@@ -112,6 +112,7 @@ config SOC_EXYNOS5420
 	select PM_GENERIC_DOMAINS if PM
 	select S5P_PM if PM
 	select S5P_SLEEP if PM
+	select ARM_ERRATA_766421
 	help
 	  Enable EXYNOS5420 SoC support
 
