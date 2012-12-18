@@ -849,6 +849,21 @@ static int mixer_check_mode(void *ctx, struct drm_display_mode *mode)
 
 	return -EINVAL;
 }
+
+static void mixer_apply(void *ctx)
+{
+	struct mixer_context *mixer_ctx = ctx;
+	int i;
+
+	DRM_DEBUG_KMS("%s\n", __FILE__);
+
+	for (i = 0; i < MIXER_WIN_NR; i++) {
+		struct hdmi_win_data *win_data = &mixer_ctx->win_data[i];
+		if (win_data->enabled)
+			mixer_win_commit(ctx, i);
+	}
+}
+
 static void mixer_wait_for_vblank(void *ctx)
 {
 	struct mixer_context *mixer_ctx = ctx;
@@ -880,7 +895,8 @@ static void mixer_window_suspend(struct mixer_context *ctx)
 	for (i = 0; i < MIXER_WIN_NR; i++) {
 		win_data = &ctx->win_data[i];
 		win_data->resume = win_data->enabled;
-		mixer_win_disable(ctx, i);
+		if (win_data->enabled)
+			mixer_win_disable(ctx, i);
 	}
 	mixer_wait_for_vblank(ctx);
 }
@@ -980,6 +996,8 @@ static struct exynos_mixer_ops mixer_ops = {
 	.win_mode_set		= mixer_win_mode_set,
 	.win_commit		= mixer_win_commit,
 	.win_disable		= mixer_win_disable,
+
+	.apply                  = mixer_apply,
 
 	/* display */
 	.check_mode		= mixer_check_mode,

@@ -56,8 +56,11 @@ struct exynos_mixer_ops {
 	void (*win_commit)(void *ctx, int zpos);
 	void (*win_disable)(void *ctx, int zpos);
 
+	void (*apply)(void *ctx);
+
 	/* display */
 	int (*check_mode)(void *ctx, struct drm_display_mode *mode);
+
 };
 
 void exynos_hdmi_drv_attach(struct exynos_drm_hdmi_context *ctx);
