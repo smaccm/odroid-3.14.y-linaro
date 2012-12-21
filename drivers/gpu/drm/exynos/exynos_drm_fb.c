@@ -69,9 +69,20 @@ static void exynos_drm_fb_destroy(struct drm_framebuffer *fb)
 {
 	struct exynos_drm_fb *exynos_fb = to_exynos_fb(fb);
 	unsigned int i;
+	dma_addr_t dma_addr;
+	unsigned long size;
 
-	/* make sure that overlay data are updated before relesing fb. */
-	exynos_drm_encoder_complete_scanout(fb);
+	DRM_DEBUG_KMS("%s\n", __FILE__);
+
+	for (i = 0; i < ARRAY_SIZE(exynos_fb->exynos_gem_obj); i++) {
+		if (exynos_fb->exynos_gem_obj[i] == NULL)
+			continue;
+
+		dma_addr = exynos_fb->exynos_gem_obj[i]->buffer->dma_addr;
+		size = exynos_fb->exynos_gem_obj[i]->buffer->size;
+
+		exynos_drm_encoder_complete_scanout(fb->dev, dma_addr, size);
+	}
 
 	drm_framebuffer_cleanup(fb);
 
