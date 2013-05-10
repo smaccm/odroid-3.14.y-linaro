@@ -1587,6 +1587,14 @@ static int hdmi_resources_init(struct hdmi_context *hdata)
 	res->regul_count = ARRAY_SIZE(supply);
 #endif
 
+	clk_prepare(res->hdmi);
+	clk_prepare(res->sclk_hdmi);
+	clk_prepare(res->sclk_pixel);
+	clk_prepare(res->sclk_hdmiphy);
+	clk_prepare(res->hdmiphy);
+
+	clk_set_parent(res->sclk_hdmi, res->sclk_pixel);
+
 	return 0;
 fail:
 	DRM_ERROR("HDMI resource init - failed\n");
@@ -1767,20 +1775,23 @@ static int hdmi_probe(struct platform_device *pdev)
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	hdata->regs = devm_ioremap_resource(dev, res);
-	if (IS_ERR(hdata->regs))
-		return PTR_ERR(hdata->regs);
+	hdata->regs = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(hdata->regs)) {
+		ret = PTR_ERR(hdata->regs);
+		goto err_clk_res;
+	}
 
 	ret = devm_gpio_request(dev, hdata->hpd_gpio, "HPD");
 	if (ret) {
 		DRM_ERROR("failed to request HPD gpio\n");
-		return ret;
+		goto err_clk_res;
 	}
 
 	/* DDC i2c driver */
 	if (i2c_add_driver(&ddc_driver)) {
 		DRM_ERROR("failed to register ddc i2c driver\n");
-		return -ENOENT;
+		ret = -ENOENT;
+		goto err_clk_res;
 	}
 
 	hdata->ddc_port = hdmi_ddc;
@@ -1827,6 +1838,12 @@ err_hdmiphy:
 		exynos_hdmiphy_platform_driver_unregister();
 err_ddc:
 	i2c_del_driver(&ddc_driver);
+err_clk_res:
+	clk_unprepare(hdata->res.hdmi);
+	clk_unprepare(hdata->res.sclk_hdmi);
+	clk_unprepare(hdata->res.sclk_pixel);
+	clk_unprepare(hdata->res.sclk_hdmiphy);
+	clk_unprepare(hdata->res.hdmiphy);
 	return ret;
 }
 
@@ -1847,6 +1864,11 @@ static int hdmi_remove(struct platform_device *pdev)
 	/* DDC i2c driver */
 	i2c_del_driver(&ddc_driver);
 
+	clk_unprepare(hdata->res.hdmi);
+	clk_unprepare(hdata->res.sclk_hdmi);
+	clk_unprepare(hdata->res.sclk_pixel);
+	clk_unprepare(hdata->res.sclk_hdmiphy);
+	clk_unprepare(hdata->res.hdmiphy);
 	return 0;
 }
 
