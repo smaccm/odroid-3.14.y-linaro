@@ -53,7 +53,9 @@ static struct of_device_id hdmiphy_match_types[] = {
 };
 
 static const struct i2c_device_id hdmiphy_id[] = {
-	{ },
+	{ "exynos5-hdmiphy", 0 },
+	{ "exynos4210-hdmiphy", 0 },
+	{ "exynos4212-hdmiphy", 0 },
 };
 
 struct i2c_driver hdmiphy_driver = {
