@@ -1451,14 +1451,18 @@ static void hdmi_poweroff(struct hdmi_context *hdata)
 	 * The TV power domain needs any condition of hdmiphy to turn off and
 	 * its reset state seems to meet the condition.
 	 */
+#if 0
 	hdmiphy_conf_reset(hdata);
 	hdmiphy_poweroff(hdata);
 
 	clk_disable_unprepare(res->sclk_hdmi);
 	clk_disable_unprepare(res->hdmi);
-#if 0
+
 	regulator_bulk_disable(res->regul_count, res->regul_bulk);
 #endif
+
+	hdmi_phy_pow_ctrl_reg_writemask(hdata, PMU_HDMI_PHY_DISABLE,
+		PMU_HDMI_PHY_CONTROL_MASK);
 
 	mutex_lock(&hdata->hdmi_mutex);
 
