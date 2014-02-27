@@ -157,6 +157,13 @@ extern struct exynos_tmu_init_data const exynos5250_default_tmu_data;
 #define EXYNOS5250_TMU_DRV_DATA (NULL)
 #endif
 
+#if defined(CONFIG_SOC_EXYNOS5410)
+extern struct exynos_tmu_init_data const exynos5410_default_tmu_data;
+#define EXYNOS5410_TMU_DRV_DATA (&exynos5410_default_tmu_data)
+#else
+#define EXYNOS5410_TMU_DRV_DATA (NULL)
+#endif
+
 #if defined(CONFIG_SOC_EXYNOS5420)
 extern struct exynos_tmu_init_data const exynos5420_default_tmu_data;
 #define EXYNOS5420_TMU_DRV_DATA (&exynos5420_default_tmu_data)
