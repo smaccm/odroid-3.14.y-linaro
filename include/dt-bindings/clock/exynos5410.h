@@ -38,6 +38,9 @@
 #define CLK_SCLK_USBPHY300 152
 #define CLK_SCLK_USBPHY301 153
 #define CLK_SCLK_EPLL 154
+#define CLK_SCLK_SPI0 155
+#define CLK_SCLK_SPI1 156
+#define CLK_SCLK_SPI2 157
 
 /* gate clocks */
 #define CLK_UART0 257
@@ -59,6 +62,10 @@
 
 #define CLK_PDMA0 275
 #define CLK_PDMA1 276
+
+#define CLK_SPI0		277
+#define CLK_SPI1		278
+#define CLK_SPI2		279
 
 #define CLK_MCT 315
 #define CLK_TMU_APBIF 318
