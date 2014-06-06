@@ -79,6 +79,19 @@
 		#clock-cells = <1>;
 	};
 
+	timer {
+		compatible = "arm,cortex-a15-timer", "arm,armv7-timer";
+		interrupts = <1 13 0xf08>,
+			     <1 14 0xf08>,
+			     <1 11 0xf08>,
+			     <1 10 0xf08>;
+		/* Unfortunately we need this since some versions of U-Boot
+		 * on Exynos don't set the CNTFRQ register, so we need the
+		 * value from DT.
+		 */
+		clock-frequency = <24000000>;
+	};
+
 	timer@101C0000 {
 		compatible = "samsung,exynos4210-mct";
 		reg = <0x101C0000 0xB00>;
