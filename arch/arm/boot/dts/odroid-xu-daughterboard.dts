@@ -1,0 +1,71 @@
+/*
+ * Odroid-XU board with NICTA daughterboard.
+ * This file contains only extensions to hook
+ * SPI to the right CS lines.
+ */
+#include "exynos5410-odroidxu.dts"
+/ {
+
+spi_1: spi@12d30000 {
+    status = "okay";
+    num-cs = <6>;
+    cs-gpios = <&gpx2 0 0>, <&gpx1 6 0>, <&gpx2 5 0>, 
+       		  <&gpx1 3 0>, <&gpx1 2 0>, <&gpx2 7 0>;
+    samsung,spi-src-clk = <0>;
+    nicta-can {
+      	     compatible = "spidev";
+	     spi-max-frequency = <1000000>; /* 1MHz */
+	     reg =  <0>;
+	     controller-data {
+	       cs-gpio = <&gpx2 0 0>;
+	       samsung,spi-feedback-delay = <2>;
+	     };
+    };
+    nicta-mpu {
+      compatible = "spidev";
+      label = "nicta:mpu";
+      spi-max-frequency = <1000000>; /* 1MHz */
+      reg =  <1>;
+      controller-data {
+	cs-gpio = <&gpx1 6 0>;
+	samsung,spi-feedback-delay = <2>;
+      };
+    };
+    nicta-acc {
+      compatible = "spidev";
+      spi-max-frequency = <1000000>; /* 1MHz */
+      reg =  <2>;
+      controller-data {
+	cs-gpio = <&gpx2 5 0>;
+	samsung,spi-feedback-delay = <2>;
+      };
+    };
+    nicta-gyroscope {
+      compatible = "spidev";
+      spi-max-frequency = <1000000>; /* 1MHz */
+      reg =  <3>;
+      controller-data {
+	cs-gpio = <&gpx1 3 0>;
+	samsung,spi-feedback-delay = <2>;
+      };
+    };
+    nicta-barometer {
+      compatible = "spidev";
+      reg = <4>;
+      spi-max-frequency = <1000000>; /* 1MHz */
+      controller-data {
+	cs-gpio = <&gpx1 2 0>;
+	samsung,spi-feedback-delay = <2>;
+      };
+    };
+    nicta-extspi {
+      compatible = "spidev";
+      reg = <5>;
+      spi-max-frequency = <1000000>; /* 1MHz */
+      controller-data {
+	cs-gpio = <&gpx2 7 0>;
+	samsung,spi-feedback-delay = <0>;
+      };
+    };
+};	     		
+ };
