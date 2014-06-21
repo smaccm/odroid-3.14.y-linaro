@@ -16,8 +16,9 @@
 #include <asm/mach/arch.h>
 #include <plat/mfc.h>
 
+#include <mach/regs-pmu.h>
+
 #include "common.h"
-#include "regs-pmu.h"
 
 static void __init exynos5_dt_machine_init(void)
 {

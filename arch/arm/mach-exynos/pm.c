@@ -32,8 +32,9 @@
 #include <mach/map.h>
 #include <mach/pm-core.h>
 
+#include <mach/regs-pmu.h>
+
 #include "common.h"
-#include "regs-pmu.h"
 
 #define EXYNOS4_EPLL_LOCK			(S5P_VA_CMU + 0x0C010)
 #define EXYNOS4_VPLL_LOCK			(S5P_VA_CMU + 0x0C020)

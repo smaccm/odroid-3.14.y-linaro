@@ -24,7 +24,7 @@
 
 #include <plat/devs.h>
 
-#include "regs-pmu.h"
+#include <mach/regs-pmu.h>
 
 /*
  * Exynos specific wrapper around the generic power domain

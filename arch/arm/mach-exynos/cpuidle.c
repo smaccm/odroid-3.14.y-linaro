@@ -29,8 +29,9 @@
 #include <mach/pm-core.h>
 #include <mach/map.h>
 
+#include <mach/regs-pmu.h>
+
 #include "common.h"
-#include "regs-pmu.h"
 
 #define REG_DIRECTGO_ADDR	(samsung_rev() == EXYNOS4210_REV_1_1 ? \
 			S5P_INFORM7 : (samsung_rev() == EXYNOS4210_REV_1_0 ? \

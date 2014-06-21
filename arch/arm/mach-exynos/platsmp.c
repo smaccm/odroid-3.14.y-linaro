@@ -30,8 +30,9 @@
 
 #include <plat/cpu.h>
 
+#include <mach/regs-pmu.h>
+
 #include "common.h"
-#include "regs-pmu.h"
 
 extern void exynos4_secondary_startup(void);
 

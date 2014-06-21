@@ -21,8 +21,9 @@
 
 #include <plat/cpu.h>
 
+#include <mach/regs-pmu.h>
+
 #include "common.h"
-#include "regs-pmu.h"
 
 static inline void cpu_enter_lowpower_a9(void)
 {
