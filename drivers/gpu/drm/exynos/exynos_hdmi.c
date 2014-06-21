@@ -1468,12 +1468,13 @@ static void hdmi_poweroff(struct hdmi_context *hdata)
 
 	clk_disable_unprepare(res->sclk_hdmi);
 	clk_disable_unprepare(res->hdmi);
+
+	regulator_bulk_disable(res->regul_count, res->regul_bulk);
 #endif
 
 	hdmi_phy_pow_ctrl_reg_writemask(hdata, PMU_HDMI_PHY_DISABLE,
 		PMU_HDMI_PHY_CONTROL_MASK);
 
-	regulator_bulk_disable(res->regul_count, res->regul_bulk);
 
 	mutex_lock(&hdata->hdmi_mutex);
 
