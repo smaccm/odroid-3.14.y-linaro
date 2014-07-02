@@ -308,6 +308,11 @@
 		clock-names = "uart", "clk_uart_baud0";
 	};
 
+	serial@12C30000 {
+		clocks = <&clock CLK_UART3>, <&clock CLK_SCLK_UART3>;
+		clock-names = "uart", "clk_uart_baud0";
+	};
+
 	hdmi {
 		compatible = "samsung,exynos5410-hdmi";
 		reg = <0x14530000 0x70000>;
