@@ -86,7 +86,7 @@
 		interrupts = <0>, <1>, <2>, <3>,
 			<4>, <5>, <6>, <7>,
 			<8>, <9>, <10>, <11>;
-		clocks = <&fin_pll>, <&clock CLK_MCT>;
+		clocks = <&clock CLK_FIN_PLL>, <&clock CLK_MCT>;
 		clock-names = "fin_pll", "mct";
 
 		interrupt_map: interrupt-map {
@@ -422,7 +422,7 @@
 	usb3_phy0: usbphy@12100000 {
 		compatible = "samsung,exynos5250-usb3phy";
 		reg = <0x12100000 0x100>;
-		clocks = <&fin_pll>, <&clock CLK_USBD300>;
+		clocks = <&clock CLK_FIN_PLL>, <&clock CLK_USBD300>;
 		clock-names = "ext_xtal", "usbdrd30";
 		#address-cells = <1>;
 		#size-cells = <1>;
@@ -454,7 +454,7 @@
 	usb2_phy: usbphy@12130000 {
 		compatible = "samsung,exynos5250-usb2phy";
 		reg = <0x12130000 0x100>;
-		clocks = <&fin_pll>, <&clock CLK_USBH20>;
+		clocks = <&clock CLK_FIN_PLL>, <&clock CLK_USBH20>;
 		clock-names = "ext_xtal", "usbhost";
 		#address-cells = <1>;
 		#size-cells = <1>;
@@ -469,7 +469,7 @@
 	usb3_phy0: usbphy@12100000 {
 		compatible = "samsung,exynos5250-usb3phy";
 		reg = <0x12100000 0x100>;
-		clocks = <&fin_pll>, <&clock CLK_USBD300>;
+		clocks = <&clock CLK_FIN_PLL>, <&clock CLK_USBD300>;
 		clock-names = "ext_xtal", "usbdrd30";
 		#address-cells = <1>;
 		#size-cells = <1>;
@@ -483,7 +483,7 @@
 	usb3_phy1: usbphy@12500000 {
 		compatible = "samsung,exynos5250-usb3phy";
 		reg = <0x12500000 0x100>;
-		clocks = <&fin_pll>, <&clock CLK_USBD301>;
+		clocks = <&clock CLK_FIN_PLL>, <&clock CLK_USBD301>;
 		clock-names = "ext_xtal", "usbdrd30";
 		#address-cells = <1>;
 		#size-cells = <1>;
@@ -529,7 +529,7 @@
 	usb3_phy1: usbphy@12500000 {
 		compatible = "samsung,exynos5250-usb3phy";
 		reg = <0x12500000 0x100>;
-		clocks = <&fin_pll>, <&clock CLK_USBD301>;
+		clocks = <&clock CLK_FIN_PLL>, <&clock CLK_USBD301>;
 		clock-names = "ext_xtal", "usbdrd30";
 		#address-cells = <1>;
 		#size-cells = <1>;
@@ -640,7 +640,7 @@
 		compatible = "samsung,exynos5250-audss-clock"; /* Is it compatible with exynos5420 or exynos5250? */
 		reg = <0x03810000 0x0C>;
 		#clock-cells = <1>;
-		clocks = <&fin_pll>, <&clock CLK_FOUT_EPLL>, <&clock CLK_SCLK_MAUDIO0>, <&clock CLK_SCLK_MAUPCM0>;
+		clocks = <&clock CLK_FIN_PLL>, <&clock CLK_FOUT_EPLL>, <&clock CLK_SCLK_MAUDIO0>, <&clock CLK_SCLK_MAUPCM0>;
 		clock-names = "pll_ref", "pll_in", "sclk_audio", "sclk_pcm_in";
 	};
 
