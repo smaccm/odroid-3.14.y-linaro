@@ -99,6 +99,7 @@ config SOC_EXYNOS5410
 	bool "SAMSUNG EXYNOS5410"
 	default y
 	depends on ARCH_EXYNOS5
+	select ARCH_HAS_BANDGAP
 	select PM_GENERIC_DOMAINS if PM
 	select S5P_PM if PM_SLEEP
 	select S5P_SLEEP if PM_SLEEP
