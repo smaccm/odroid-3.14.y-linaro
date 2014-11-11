@@ -24,7 +24,7 @@
 	};
 
 	chosen {
-		bootargs = "console=ttySAC2,115200n8 console=tty1 root=/dev/mmcblk0p2 rootwait rw debug loglevel=7 drm_kms_helper.edid_firmware=edid/1920x1080.fw video=HDMI-A-1:1920x1080MR-32@60 ";
+		bootargs = "console=ttySAC2,115200n8 console=tty1 root=/dev/mmcblk0p2 rootwait rw debug loglevel=7 drm_kms_helper.edid_firmware=edid/1920x1080.fw video=HDMI-A-1:1920x1080MR-32@60 text";
 	};
 
 	codec@11000000 {
