@@ -57,7 +57,7 @@
 			bus-width = <8>;
 		};
 	};
-/*
+
 	mmc@12220000 {
 		status = "okay";
 		num-slots = <1>;
@@ -75,7 +75,7 @@
 			disable-wp;
 		};
 	};
-*/
+
 	leds {
 		compatible = "gpio-leds";
 		hearbeat {
