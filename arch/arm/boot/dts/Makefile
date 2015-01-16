@@ -81,6 +81,7 @@ dtb-$(CONFIG_ARCH_EXYNOS) += exynos4210-origen.dtb \
 	exynos5440-sd5v1.dtb \
 	exynos5440-ssdk5440.dtb \
 	exynos5410-odroidxu-sel4vm.dtb \
+	exynos5410-odroidxu-sel4vm-secure.dtb \
 	exynos5250-arndale-sel4vm.dtb \
 	odroid-xu-daughterboard.dtb 
 dtb-$(CONFIG_ARCH_HI3xxx) += hi3620-hi4511.dtb \
