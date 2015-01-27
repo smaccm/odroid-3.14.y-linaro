@@ -1,0 +1,24 @@
+#
+# seL4 virtual drivers
+#
+
+menu "seL4 driver support"
+	depends on SEL4
+
+config SEL4_DEBUG_PUTCHAR
+	bool "seL4 debug serial driver"
+	depends on SEL4
+	default y
+	help
+	  The seL4 kernel provides a system call for printing to the terminal
+	  when built in debug mode. By selecting this option, a kernel driver
+	  will be built to utilise this feature.
+
+config SEL4_USB
+	bool "seL4 USB virtio component driver"
+	depends on SEL4
+	default y
+	help
+	  A USB host controller driver for seL4 virtio USB components.
+
+endmenu
