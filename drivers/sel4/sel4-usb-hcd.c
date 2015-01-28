@@ -345,17 +345,26 @@ static int urb_to_surb(struct urb *urb, struct sel4urb *surb)
 
 static int surb_to_urb(struct sel4urb *surb, struct urb *urb)
 {
+    int status;
 	if (surb->urb_status == (1u << 31)) {
 		dprintf("INCOMPLETE URB\n");
-		return 0;
-	}
-	if (urb->transfer_buffer) {
-		urb->actual_length = urb->transfer_buffer_length;
-		dprintf("Returning URB, status: 0x%x length 0x%x\n", surb->urb_status, urb->actual_length);
+		status = -EINPROGRESS;
+	}else if (urb->transfer_buffer) {
+        if(surb->urb_status >= 0){
+            urb->actual_length = urb->transfer_buffer_length - surb->urb_status;
+            status = 0;
+        }else{
+            urb->actual_length = 0;
+            status = -1;
+        }
+		//urb->actual_length = urb->transfer_buffer_length;
+		dprintf("Returning URB, status: 0x%x length %d actual length %d\n", surb->urb_status, urb->transfer_buffer_length, urb->actual_length);
 	} else {
 		urb->actual_length = 0;
+        status = 0;
+		dprintf("Returning URB, status: 0x%x length %d actual length %d\n", surb->urb_status, urb->transfer_buffer_length, urb->actual_length);
 	}
-	return 0;
+	return status;
 }
 
 static irqreturn_t vhci_irq(struct usb_hcd *hcd)
@@ -364,8 +373,6 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 	unsigned long flags;
 	struct sel4urb *surb;
 	struct urb *urb;
-	int status = 0;
-	int ret;
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
@@ -378,9 +385,11 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 		dprintf("vhci IRQ: NO PENDING URB\n");
 		return IRQ_HANDLED;
 	} else {
-		ret = surb_to_urb(surb, urb);
-		if (ret)
+	    int status = 0;
+		status = surb_to_urb(surb, urb);
+		if (status){
 			dprintf("vhci IRQ: Failed to finalise URB!\n");
+        }
 
 		dprintf("vhci IRQ: Return URB @ 0x%0x\n", (uint32_t)urb);
 		usb_hcd_unlink_urb_from_ep(hcd, urb);
