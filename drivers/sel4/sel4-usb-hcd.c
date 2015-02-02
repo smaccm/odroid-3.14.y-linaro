@@ -32,47 +32,67 @@
 
 #include "sel4.h"
 
+//#define DEBUG_VUSB
 //#define DEBUG_ROOTHUB
 
 #define max_packet(wMaxPacketSize) ((wMaxPacketSize) & 0x07ff)
 
 #define CNORMAL   "\033[0m"
 
-#define CFRED	 "\033[31m"
+#define CFRED     "\033[31m"
 #define CFGREEN   "\033[32m"
 #define CFYELLOW  "\033[33m"
-#define CFBLUE	"\033[34m"
+#define CFBLUE    "\033[34m"
 #define CFMAGENTA "\033[35m"
-#define CFCYAN	"\033[36m"
+#define CFCYAN    "\033[36m"
 #define CFWHITE   "\033[37m"
 
-#define CBRED	 "\033[41m"
+#define CBRED     "\033[41m"
 #define CBGREEN   "\033[42m"
 #define CBYELLOW  "\033[43m"
-#define CBBLUE	"\033[44m"
+#define CBBLUE    "\033[44m"
 #define CBMAGENTA "\033[45m"
-#define CBCYAN	"\033[46m"
+#define CBCYAN    "\033[46m"
 #define CBWHITE   "\033[47m"
 
+#define note(...)                                \
+	do {                                         \
+		printk(CFCYAN "SEL4USB:" __VA_ARGS__);   \
+		printk(CNORMAL);                         \
+	} while (0)
 
 
-#define dprintf(...)						\
-	do {									\
+#ifdef DEBUG_VUSB
+#define dvusb(...)                               \
+	do {                                         \
 		printk(CFYELLOW "SEL4USB:" __VA_ARGS__); \
-		printk(CNORMAL);					\
+		printk(CNORMAL);                         \
 	} while (0)
-
-#define ddprintf(...)						\
-	do {									\
-		printk(CFCYAN "SEL4USB:" __VA_ARGS__); \
-		printk(CNORMAL);					\
-	} while (0)
+#else
+#define dvusb(...) do {} while (0)
+#endif
 
 #ifdef DEBUG_ROOTHUB
-#define DROOTHUB(...) printk(CFYELLOW "SEL4USB root hub: " __VA_ARGS__);
+#define DROOTHUB(...)
+#define DROOTHUB(...)                                      \
+	do {                                                   \
+		printk(CFYELLOW "SEL4USB root hub: " __VA_ARGS__); \
+		printk(CNORMAL);                                   \
+	} while (0)
 #else
 #define DROOTHUB(...) do {} while (0)
 #endif
+
+
+#define DRIVER_AUTHOR "Alexander Kroh"
+#define DRIVER_DESC "USB 2.0 'Virtualised' Host Controller (VHCI) Driver"
+
+#define MAX_ACTIVE_URB   (0x1000 / sizeof(struct sel4urb))
+#define SURBSTS_PENDING  (1 << 0)
+#define SURBSTS_ACTIVE   (1 << 1)
+#define SURBSTS_COMPLETE (1 << 2)
+
+
 
 const char* pipe_type_str(unsigned int pipe)
 {
@@ -85,18 +105,9 @@ const char* pipe_type_str(unsigned int pipe)
 	}
 }
 
-
-#define dputs(s)		seL4_DebugPuts(CFCYAN "SEL4USB:" s CNORMAL)
-
-#define poke() ddprintf("%s:%d\n", __func__, __LINE__)
-
-#define DRIVER_AUTHOR "Alexander Kroh"
-#define DRIVER_DESC "USB 2.0 'Virtualised' Host Controller (VHCI) Driver"
-
 static const char hcd_name[] = "vhci_hcd";
 
 static struct platform_driver vhci_driver;
-
 
 static const struct usb_device_descriptor _hub_device_desc = {
 	.bLength = sizeof(_hub_device_desc),
@@ -159,17 +170,6 @@ static struct usb_hub_descriptor _hub_hub_desc = {
 /*	.portcfg = {0} */
 };
 
-struct vusb_ctrl_regs {
-	uint32_t status;
-	uint32_t req_reply;
-	uint32_t NbrPorts;
-	struct usb_ctrlrequest req;
-};
-
-struct vhci_hcd {
-	spinlock_t lock;
-};
-
 struct sel4urbt {
 	uintptr_t paddr;
 	int size;
@@ -186,11 +186,67 @@ struct sel4urb {
 	uint16_t max_pkt;
 	uint16_t rate_ms;
 	uint16_t nxact;
-	void    *token;
-	uint32_t urb_status;
+	void	*token;
+	uint16_t urb_status;
+	uint16_t urb_bytes_remaining;
 	struct sel4urbt desc[2];
 } __packed;
 
+struct vusb_ctrl_regs {
+	uint32_t status;
+	uint32_t req_reply;
+	uint32_t intr;
+	uint32_t notify;
+	uint32_t NbrPorts;
+	struct usb_ctrlrequest req;
+};
+
+struct vusb_data_regs {
+	struct sel4urb surb[MAX_ACTIVE_URB];
+};
+
+struct vhci_hcd {
+	spinlock_t lock;
+	struct vusb_ctrl_regs *ctrl_regs;
+	struct vusb_data_regs *data_regs;
+	struct urb *urb[MAX_ACTIVE_URB];
+	/* Represents the index of the first in flight urb */
+	int surb_head;
+	/* Represents the index of the next entry to attempt to consume */
+	int surb_tail;
+	struct list_head urb_overflow;
+};
+
+static struct sel4urb *surb_next_free(struct vhci_hcd *vhci, struct urb *urb)
+{
+	int start = vhci->surb_tail;
+	struct sel4urb *surb = NULL;
+	/* Since we may have an INT packet, we need to scan */
+	do {
+		if (vhci->data_regs->surb[vhci->surb_tail].urb_status == 0) {
+			surb = &vhci->data_regs->surb[vhci->surb_tail];
+			vhci->urb[vhci->surb_tail] = urb;
+			dvusb("Claiming SURB %d\n", vhci->surb_tail);
+			return surb;
+		}
+		vhci->surb_tail = (vhci->surb_tail + 1) % MAX_ACTIVE_URB;
+	} while (vhci->surb_tail != start);
+	return NULL;
+}
+
+static int surb_next_complete(struct vhci_hcd *vhci)
+{
+	int start = vhci->surb_head;
+	do {
+		int cur_idx = vhci->surb_head;
+		vhci->surb_head = (vhci->surb_head + 1) % MAX_ACTIVE_URB;
+		if (vhci->data_regs->surb[cur_idx].urb_status & SURBSTS_COMPLETE) {
+			dvusb("Releasing SURB %d\n", cur_idx);
+			return cur_idx;
+		}
+	} while (vhci->surb_head != start);
+	return -1;
+}
 
 static inline struct vhci_hcd *hcd_to_vhci(struct usb_hcd *hcd)
 {
@@ -211,15 +267,14 @@ static int __init vhci_hcd_init(void)
 {
 	if (usb_disabled())
 		return -ENODEV;
-	poke();
-	dprintf(KERN_INFO "%s: " DRIVER_DESC "\n", hcd_name);
+	dvusb(KERN_INFO "%s: " DRIVER_DESC "\n", hcd_name);
 	return platform_driver_register(&vhci_driver);
 }
 module_init(vhci_hcd_init);
 
 static void __exit vhci_hcd_cleanup(void)
 {
-	poke();
+	note("%s:%d\n", __func__, __LINE__);
 }
 module_exit(vhci_hcd_cleanup);
 
@@ -227,16 +282,11 @@ static void vhci_stop(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
 	(void)vhci;
-	poke();
+	note("%s:%d\n", __func__, __LINE__);
 }
 
 static int vhci_run(struct usb_hcd *hcd)
 {
-	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	(void)vhci;
-	poke();
-	hcd->uses_new_polling = 0;
-	hcd->self.root_hub->parent = 0;
 	return 0;
 }
 
@@ -245,71 +295,60 @@ int vhci_setup(struct usb_hcd *hcd)
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
 
 	spin_lock_init(&vhci->lock);
+	vhci->ctrl_regs = hcd->regs + 0x1000;
+	vhci->data_regs = hcd->regs;
+	vhci->surb_head = 0;
+	vhci->surb_tail = 0;
+	INIT_LIST_HEAD(&vhci->urb_overflow);
 
-	poke();
 	return 0;
 }
 
 static void vhci_shutdown(struct usb_hcd *hcd)
 {
-	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	poke();
-	(void)vhci;
+	(void)hcd;
+	note("%s:%d\n", __func__, __LINE__);
 }
 
 static void
 vhci_endpoint_disable(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 {
-	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	poke();
-	(void)vhci;
+	(void)hcd;
+	(void)ep;
 }
 
 static void
 vhci_endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 {
-	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	int epnum = usb_endpoint_num(&ep->desc);
-	int is_out = usb_endpoint_dir_out(&ep->desc);
-	struct usb_device *udev = ep_to_udev(ep);
-	unsigned long flags;
-	poke();
-	spin_lock_irqsave(&vhci->lock, flags);
-	(void)epnum;
-	(void)is_out;
-	dprintf("ep reset:: 0x%x\n", (uint32_t)udev);
-	//usb_settoggle(udev, epnum, is_out, 0);
-	spin_unlock_irqrestore(&vhci->lock, flags);
+	(void)hcd;
+	(void)ep;
 }
 
 static void vhci_remove_device(struct usb_hcd *hcd, struct usb_device *udev)
 {
-	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	poke();
-	(void)vhci;
+	(void)hcd;
+	(void)udev;
+	note("%s:%d\n", __func__, __LINE__);
 }
 
 static int vhci_get_frame(struct usb_hcd *hcd)
 {
-	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	poke();
-	(void)vhci;
+	(void)hcd;
+	note("%s:%d\n", __func__, __LINE__);
 	return 0;
 }
-
-
-
-struct urb *_cur_urb = NULL;
 
 static int urb_to_surb(struct urb *urb, struct sel4urb *surb)
 {
 	switch (usb_pipetype(urb->pipe)) {
 	case PIPE_CONTROL:
 	case PIPE_INTERRUPT:
-	case PIPE_ISOCHRONOUS:
+	case PIPE_BULK:
 		break;
+	case PIPE_ISOCHRONOUS:
+		dvusb("Isochronos packets not supported\n");
 	default:
-		dprintf("blah\n");
+		dvusb("Unknown pipe type\n");
 	}
 
 	surb->addr = usb_pipedevice(urb->pipe);
@@ -325,7 +364,7 @@ static int urb_to_surb(struct urb *urb, struct sel4urb *surb)
 	surb->max_pkt = max_packet(usb_maxpacket(urb->dev, urb->pipe, usb_pipeout(urb->pipe)));
 	surb->rate_ms = urb->interval;
 	surb->token = urb;
-	surb->urb_status = (1u << 31);
+	surb->urb_status = SURBSTS_PENDING;
 
 	surb->nxact = 0;
 	if (urb->setup_packet) {
@@ -345,24 +384,27 @@ static int urb_to_surb(struct urb *urb, struct sel4urb *surb)
 
 static int surb_to_urb(struct sel4urb *surb, struct urb *urb)
 {
-    int status;
-	if (surb->urb_status == (1u << 31)) {
-		dprintf("INCOMPLETE URB\n");
+	int status;
+	if (surb->urb_status != SURBSTS_COMPLETE) {
+		dvusb("INCOMPLETE URB\n");
 		status = -EINPROGRESS;
 	}else if (urb->transfer_buffer) {
-        if(surb->urb_status >= 0){
-            urb->actual_length = urb->transfer_buffer_length - surb->urb_status;
-            status = 0;
-        }else{
-            urb->actual_length = 0;
-            status = -1;
-        }
-		//urb->actual_length = urb->transfer_buffer_length;
-		dprintf("Returning URB, status: 0x%x length %d actual length %d\n", surb->urb_status, urb->transfer_buffer_length, urb->actual_length);
+		if (surb->urb_status >= 0) {
+			urb->actual_length = urb->transfer_buffer_length - surb->urb_bytes_remaining;
+			status = 0;
+		} else {
+			urb->actual_length = 0;
+			status = -1;
+		}
+		dvusb("Returning URB, status: 0x%x remaining: 0x%x, length %d actual length %d\n",
+				surb->urb_status, surb->urb_bytes_remaining, urb->transfer_buffer_length,
+				urb->actual_length);
 	} else {
 		urb->actual_length = 0;
-        status = 0;
-		dprintf("Returning URB, status: 0x%x length %d actual length %d\n", surb->urb_status, urb->transfer_buffer_length, urb->actual_length);
+		status = 0;
+		dvusb("Returning URB, status: 0x%x remaining: 0x%x, length %d actual length %d\n",
+				surb->urb_status, surb->urb_bytes_remaining, urb->transfer_buffer_length,
+				urb->actual_length);
 	}
 	return status;
 }
@@ -371,33 +413,29 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
 	unsigned long flags;
-	struct sel4urb *surb;
-	struct urb *urb;
 
 	spin_lock_irqsave(&vhci->lock, flags);
+	vhci->ctrl_regs->intr = 0;
+	while (1) {
+		int idx;
+		idx = surb_next_complete(vhci);
 
-	surb = (struct sel4urb *)hcd->regs;
+		if (idx < 0) {
+			spin_unlock_irqrestore(&vhci->lock, flags);
+			return IRQ_HANDLED;
+		} else {
+			struct sel4urb *surb = &vhci->data_regs->surb[idx];
+			struct urb *urb = vhci->urb[idx];
+			int status;
+			status = surb_to_urb(surb, urb);
+			if (status)
+				dvusb("vhci IRQ: Failed to finalise URB!\n");
 
-	urb = _cur_urb;
-	_cur_urb = NULL;
-
-	if (urb == NULL) {
-		dprintf("vhci IRQ: NO PENDING URB\n");
-		return IRQ_HANDLED;
-	} else {
-	    int status = 0;
-		status = surb_to_urb(surb, urb);
-		if (status){
-			dprintf("vhci IRQ: Failed to finalise URB!\n");
-        }
-
-		dprintf("vhci IRQ: Return URB @ 0x%0x\n", (uint32_t)urb);
-		usb_hcd_unlink_urb_from_ep(hcd, urb);
-		usb_hcd_giveback_urb(hcd, urb, status);
+			usb_hcd_unlink_urb_from_ep(hcd, urb);
+			usb_hcd_giveback_urb(hcd, urb, status);
+			surb->urb_status = 0;
+		}
 	}
-
-	spin_unlock_irqrestore(&vhci->lock, flags);
-
 	return IRQ_HANDLED;
 }
 
@@ -408,47 +446,41 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 	struct sel4urb *surb;
 	int ret;
 
-	if (urb->interval) {
-		dprintf("WARNING: ignoring INT packets for now\n");
+	spin_lock_irqsave(&vhci->lock, flags);
+	surb = surb_next_free(vhci, urb);
+	if (surb == NULL) {
+		printk("URB overlow in vhci driver\n");
+		list_add_tail(&urb->urb_list, &vhci->urb_overflow);
+		spin_unlock_irqrestore(&vhci->lock, flags);
 		return 0;
 	}
-
-	spin_lock_irqsave(&vhci->lock, flags);
-	surb = (struct sel4urb *)hcd->regs;
 	ret = urb_to_surb(urb, surb);
 	if (ret) {
-		dprintf("AAAAH!\n");
+		dvusb("URB translation error\n");
 		return -1;
 	}
 
-	dprintf("Enqueue URB @ 0x%x : pipe 0x%x (%s %s %d:%d) interval %d | npackets %d\n", (uint32_t)urb,
+	dvusb("Enqueue URB @ 0x%x : pipe 0x%x (%s %s %d:%d) rate %d | pkts %d\n", (uint32_t)urb,
 			urb->pipe, usb_pipein(urb->pipe) ? "IN" : "OUT",
 			pipe_type_str(urb->pipe), usb_pipedevice(urb->pipe), usb_pipeendpoint(urb->pipe),
 			urb->interval, urb->number_of_packets);
 	if (urb->setup_packet) {
-		dprintf("setup: 0x%02x 0x%02x 0x%02x%02x 0x%02x%02x 0x%02x%02x\n",
+		dvusb("setup: 0x%02x 0x%02x 0x%02x%02x 0x%02x%02x 0x%02x%02x : ",
 				urb->setup_packet[0], urb->setup_packet[1],
 				urb->setup_packet[3], urb->setup_packet[2],
 				urb->setup_packet[5], urb->setup_packet[4],
 				urb->setup_packet[7], urb->setup_packet[6]);
 	}
-	dprintf("setup dma: 0x%x 0x%x (%d)\n", (uint32_t)urb->setup_dma, (uint32_t)urb->transfer_dma, urb->transfer_buffer_length);
+	dvusb("dma: 0x%x 0x%x (%d)\n", (uint32_t)urb->setup_dma, (uint32_t)urb->transfer_dma, urb->transfer_buffer_length);
 
-	if (_cur_urb != NULL) {
-		dprintf("ERROR: Multipe packets in flight\n");
-		while (1);
-	}
-
-	_cur_urb = urb;
 	ret = usb_hcd_link_urb_to_ep(hcd, urb);
 	if (ret)
-		dprintf("link error\n");
+		dvusb("link error\n");
 
 	spin_unlock_irqrestore(&vhci->lock, flags);
-	seL4_Notify(5);
 
-	//usb_settoggle (urb->dev, usb_pipeendpoint (urb->pipe), !is_input, 1);
-	//if (unlikely(!usb_gettoggle(qh->ps.udev, epnum, is_out))) {
+//	seL4_Notify(5);
+	vhci->ctrl_regs->notify = 0;
 
 	return 0;
 }
@@ -457,18 +489,18 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
 	unsigned long flags;
-	int ret;
-	poke();
+	int ret = 0;
+	note("%s:%d\n", __func__, __LINE__);
+	dvusb("Dequeue request for URB @ %p\n", urb);
 
 	spin_lock_irqsave(&vhci->lock, flags);
-
-	dprintf("Cancel URB @ 0x%0x, we have 0x%x\n", (uint32_t)urb, (uint32_t)_cur_urb);
+#if 1
 	ret = usb_hcd_check_unlink_urb(hcd, urb, status);
 	if (ret == 0) {
 		usb_hcd_unlink_urb_from_ep(hcd, urb);
 		usb_hcd_giveback_urb(hcd, urb, status);
 	}
-
+#endif
 	spin_unlock_irqrestore(&vhci->lock, flags);
 
 	return ret;
@@ -485,7 +517,7 @@ vhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
-	ctrl_regs = (struct vusb_ctrl_regs *)(hcd->regs + 0x1000);
+	ctrl_regs = vhci->ctrl_regs;
 
 	port_sc = ctrl_regs->status;
 	ret = (ctrl_regs->NbrPorts > 7) ? 2 : 1;
@@ -512,7 +544,7 @@ static int vhci_hub_control(
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
-	ctrl_regs = (struct vusb_ctrl_regs *)(hcd->regs + 0x1000);
+	ctrl_regs = vhci->ctrl_regs;
 
 	switch (typeReq & 0xff) {
 	case 0x6: /* GET_DESCRIPTOR */
@@ -523,7 +555,7 @@ static int vhci_hub_control(
 			retval = 0;
 			break;
 		default:
-			dprintf("ERR: Unknown descriptor type 0x%x\n", wValue);
+			dvusb("ERR: Unknown descriptor type 0x%x\n", wValue);
 		}
 	case 0x00: /* GET_STATUS */
 	case 0x01: /* CLR_FEATURE */
@@ -549,7 +581,7 @@ static int vhci_hub_control(
 		retval = 0;
 		break;
 	default:
-		dprintf("ERR: Unknown request type 0x%x\n", typeReq);
+		dvusb("ERR: Unknown request type 0x%x\n", typeReq);
 	};
 
 	spin_unlock_irqrestore(&vhci->lock, flags);
@@ -560,7 +592,7 @@ static int vhci_hub_control(
 static int vhci_bus_suspend(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	poke();
+	note("%s:%d\n", __func__, __LINE__);
 	(void)vhci;
 	return 0;
 }
@@ -568,7 +600,7 @@ static int vhci_bus_suspend(struct usb_hcd *hcd)
 static int vhci_bus_resume(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	poke();
+	note("%s:%d\n", __func__, __LINE__);
 	(void)vhci;
 	return 0;
 }
@@ -577,14 +609,14 @@ static int vhci_bus_resume(struct usb_hcd *hcd)
 static void vhci_relinquish_port(struct usb_hcd *hcd, int portnum)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	poke();
+	note("%s:%d\n", __func__, __LINE__);
 	(void)vhci;
 }
 
 static int vhci_port_handed_over(struct usb_hcd *hcd, int portnum)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	poke();
+	note("%s:%d\n", __func__, __LINE__);
 	(void)vhci;
 	return 0;
 }
@@ -651,8 +683,6 @@ static int sel4_vhci_probe(struct platform_device *pdev)
 	int irq;
 	int err;
 
-	poke();
-
 	hcd = usb_create_hcd(&vhci_hc_driver, &pdev->dev, dev_name(&pdev->dev));
 	if (!hcd) {
 		dev_err(&pdev->dev, "Unable to create HCD\n");
@@ -702,8 +732,6 @@ fail:
 static int sel4_vhci_remove(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd;
-	return 0;
-	poke();
 	hcd = platform_get_drvdata(pdev);
 	usb_remove_hcd(hcd);
 	usb_put_hcd(hcd);
