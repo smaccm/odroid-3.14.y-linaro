@@ -197,6 +197,7 @@ struct vusb_ctrl_regs {
 	uint32_t req_reply;
 	uint32_t intr;
 	uint32_t notify;
+	uint32_t cancel_transaction;
 	uint32_t NbrPorts;
 	struct usb_ctrlrequest req;
 };
@@ -489,18 +490,35 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
 	unsigned long flags;
+	int i = 0;
 	int ret = 0;
 	note("%s:%d\n", __func__, __LINE__);
-	dvusb("Dequeue request for URB @ %p\n", urb);
+	printk(CFRED "Dequeue request for URB @ %p" CNORMAL "\n", urb);
 
 	spin_lock_irqsave(&vhci->lock, flags);
-#if 1
-	ret = usb_hcd_check_unlink_urb(hcd, urb, status);
-	if (ret == 0) {
-		usb_hcd_unlink_urb_from_ep(hcd, urb);
-		usb_hcd_giveback_urb(hcd, urb, status);
+
+	/* TODO also scan overflow list */
+	for (i = 0; i < MAX_ACTIVE_URB; i++) {
+		if (vhci->urb[i] == urb) {
+			struct sel4urb *surb = &vhci->data_regs->surb[i];
+			struct urb *urb = vhci->urb[i];
+			int status;
+			vhci->ctrl_regs->cancel_transaction = i;
+			status = surb_to_urb(surb, urb);
+			if (status)
+				dvusb("vhci IRQ: Failed to finalise URB!\n");
+
+			ret = usb_hcd_check_unlink_urb(hcd, urb, status);
+			if (ret == 0) {
+				usb_hcd_unlink_urb_from_ep(hcd, urb);
+				usb_hcd_giveback_urb(hcd, urb, status);
+				surb->urb_status = 0;
+			}
+
+			break;
+		}
 	}
-#endif
+
 	spin_unlock_irqrestore(&vhci->lock, flags);
 
 	return ret;
