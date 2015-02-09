@@ -73,7 +73,6 @@
 #endif
 
 #ifdef DEBUG_ROOTHUB
-#define DROOTHUB(...)
 #define DROOTHUB(...)                                      \
 	do {                                                   \
 		printk(CFYELLOW "SEL4USB root hub: " __VA_ARGS__); \
@@ -184,8 +183,9 @@ struct sel4urb {
 	uint8_t speed;
 	uint16_t ep;
 	uint16_t max_pkt;
-	uint16_t rate_ms;
+	int16_t rate_ms;
 	uint16_t nxact;
+	uint32_t dt;
 	void	*token;
 	uint16_t urb_status;
 	uint16_t urb_bytes_remaining;
@@ -259,16 +259,11 @@ static inline struct usb_hcd *vhci_to_hcd(struct vhci_hcd *vhci)
 	return container_of((void *) vhci, struct usb_hcd, hcd_priv);
 }
 
-static inline struct usb_device *ep_to_udev(struct usb_host_endpoint *ep)
-{
-	return (struct usb_device *)ep->hcpriv;
-}
-
 static int __init vhci_hcd_init(void)
 {
 	if (usb_disabled())
 		return -ENODEV;
-	dvusb(KERN_INFO "%s: " DRIVER_DESC "\n", hcd_name);
+	pr_info("%s: " DRIVER_DESC "\n", hcd_name);
 	return platform_driver_register(&vhci_driver);
 }
 module_init(vhci_hcd_init);
@@ -318,28 +313,7 @@ vhci_endpoint_disable(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 	(void)ep;
 }
 
-static void
-vhci_endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
-{
-	(void)hcd;
-	(void)ep;
-}
-
-static void vhci_remove_device(struct usb_hcd *hcd, struct usb_device *udev)
-{
-	(void)hcd;
-	(void)udev;
-	note("%s:%d\n", __func__, __LINE__);
-}
-
-static int vhci_get_frame(struct usb_hcd *hcd)
-{
-	(void)hcd;
-	note("%s:%d\n", __func__, __LINE__);
-	return 0;
-}
-
-static int urb_to_surb(struct urb *urb, struct sel4urb *surb)
+static int urb_to_surb(struct urb *urb, struct sel4urb *surb, int data_toggle)
 {
 	switch (usb_pipetype(urb->pipe)) {
 	case PIPE_CONTROL:
@@ -366,6 +340,7 @@ static int urb_to_surb(struct urb *urb, struct sel4urb *surb)
 	surb->rate_ms = urb->interval;
 	surb->token = urb;
 	surb->urb_status = SURBSTS_PENDING;
+	surb->dt = data_toggle;
 
 	surb->nxact = 0;
 	if (urb->setup_packet) {
@@ -410,6 +385,37 @@ static int surb_to_urb(struct sel4urb *surb, struct urb *urb)
 	return status;
 }
 
+static int
+vhci_schedule_urb(struct vhci_hcd *vhci, struct usb_host_endpoint *ep)
+{
+	struct sel4urb *surb;
+	struct urb *urb;
+
+	urb = list_first_entry(&ep->urb_list, struct urb, urb_list);
+	/* Grab a handle to a sel4 URB descriptor */
+	surb = surb_next_free(vhci, urb);
+	if (surb == NULL) {
+		pr_debug("URB overlow in vhci driver\n");
+		list_add_tail(&urb->urb_list, &vhci->urb_overflow);
+		return -1;
+	} else {
+		/* Fill the sel4 URB descriptor */
+		int dt = (int)urb->ep->hcpriv;
+		int ret;
+		urb->ep->hcpriv++;
+		ret = urb_to_surb(urb, surb, dt);
+		if (!ret)
+#if 0
+			seL4_Notify(5);
+#else
+			vhci->ctrl_regs->notify = 0;
+#endif
+		else
+			dvusb("URB translation error\n");
+		return ret;
+	}
+}
+
 static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
@@ -435,55 +441,60 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 			usb_hcd_unlink_urb_from_ep(hcd, urb);
 			usb_hcd_giveback_urb(hcd, urb, status);
 			surb->urb_status = 0;
+			/* If the list attached to this EP is not empty,
+			 * we need to schedule the next */
+			if (!list_empty(&urb->ep->urb_list)) {
+				int ret;
+				ret = vhci_schedule_urb(vhci, urb->ep);
+				if (ret)
+					dvusb("vhci Failed to chain URB\n");
+			}
 		}
 	}
 	return IRQ_HANDLED;
 }
 
+
+
 static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flags)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
 	unsigned long flags;
-	struct sel4urb *surb;
 	int ret;
+	int ep_was_idle;
 
-	spin_lock_irqsave(&vhci->lock, flags);
-	surb = surb_next_free(vhci, urb);
-	if (surb == NULL) {
-		printk("URB overlow in vhci driver\n");
-		list_add_tail(&urb->urb_list, &vhci->urb_overflow);
-		spin_unlock_irqrestore(&vhci->lock, flags);
-		return 0;
-	}
-	ret = urb_to_surb(urb, surb);
-	if (ret) {
-		dvusb("URB translation error\n");
-		return -1;
-	}
-
-	dvusb("Enqueue URB @ 0x%x : pipe 0x%x (%s %s %d:%d) rate %d | pkts %d\n", (uint32_t)urb,
-			urb->pipe, usb_pipein(urb->pipe) ? "IN" : "OUT",
-			pipe_type_str(urb->pipe), usb_pipedevice(urb->pipe), usb_pipeendpoint(urb->pipe),
+	dvusb("Enqueue URB @ %p : pipe 0x%x (%s %s %d:%d) rate %d | pkts %d\n",
+			urb, urb->pipe, usb_pipein(urb->pipe) ? "IN" : "OUT",
+			pipe_type_str(urb->pipe), usb_pipedevice(urb->pipe),
+			usb_pipeendpoint(urb->pipe),
 			urb->interval, urb->number_of_packets);
 	if (urb->setup_packet) {
-		dvusb("setup: 0x%02x 0x%02x 0x%02x%02x 0x%02x%02x 0x%02x%02x : ",
+		dvusb("setup: 0x%02x 0x%02x 0x%02x%02x 0x%02x%02x 0x%02x%02x\n",
 				urb->setup_packet[0], urb->setup_packet[1],
 				urb->setup_packet[3], urb->setup_packet[2],
 				urb->setup_packet[5], urb->setup_packet[4],
 				urb->setup_packet[7], urb->setup_packet[6]);
 	}
-	dvusb("dma: 0x%x 0x%x (%d)\n", (uint32_t)urb->setup_dma, (uint32_t)urb->transfer_dma, urb->transfer_buffer_length);
+	dvusb("dma: 0x%x 0x%x (%d)\n", (uint32_t)urb->setup_dma,
+		  (uint32_t)urb->transfer_dma, urb->transfer_buffer_length);
 
+	spin_lock_irqsave(&vhci->lock, flags);
+
+	ep_was_idle = list_empty(&urb->ep->urb_list);
+	urb->unlinked = 0;
 	ret = usb_hcd_link_urb_to_ep(hcd, urb);
 	if (ret)
 		dvusb("link error\n");
+	else if (ep_was_idle)
+		/* seL4 data toggle management is incompatible with that of
+		 * Linux. If there is already a queued transfer, simply add
+		 * it to the list. It will be scheduled later with the correct
+		 * explicit data toggle bit. */
+		ret = vhci_schedule_urb(vhci, urb->ep);
 
 	spin_unlock_irqrestore(&vhci->lock, flags);
 
-//	seL4_Notify(5);
-	vhci->ctrl_regs->notify = 0;
-
-	return 0;
+	return ret;
 }
 
 static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
@@ -522,6 +533,16 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	spin_unlock_irqrestore(&vhci->lock, flags);
 
 	return ret;
+}
+
+static void
+vhci_endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
+{
+	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
+	unsigned long flags;
+	spin_lock_irqsave(&vhci->lock, flags);
+	ep->hcpriv = NULL;
+	spin_unlock_irqrestore(&vhci->lock, flags);
 }
 
 static int
@@ -575,6 +596,7 @@ static int vhci_hub_control(
 		default:
 			dvusb("ERR: Unknown descriptor type 0x%x\n", wValue);
 		}
+		break;
 	case 0x00: /* GET_STATUS */
 	case 0x01: /* CLR_FEATURE */
 	case 0x03: /* SET_FEATURE */
@@ -583,6 +605,7 @@ static int vhci_hub_control(
 		ctrl_regs->req.wValue = wValue;
 		ctrl_regs->req.wIndex = wIndex;
 		ctrl_regs->req.wLength = wLength;
+		asm volatile("dsb");
 		ctrl_regs->status = 1;
 		DROOTHUB("hub ctrl> typeReq 0x%04x | wValue 0x%04x | wIndex 0x%04x | "
 				 "wLength 0x%04x\n", typeReq, wValue, wIndex, wLength);
@@ -636,6 +659,20 @@ static int vhci_port_handed_over(struct usb_hcd *hcd, int portnum)
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
 	note("%s:%d\n", __func__, __LINE__);
 	(void)vhci;
+	return 0;
+}
+
+static void vhci_remove_device(struct usb_hcd *hcd, struct usb_device *udev)
+{
+	(void)hcd;
+	(void)udev;
+	note("%s:%d\n", __func__, __LINE__);
+}
+
+static int vhci_get_frame(struct usb_hcd *hcd)
+{
+	(void)hcd;
+	note("%s:%d\n", __func__, __LINE__);
 	return 0;
 }
 
@@ -771,7 +808,7 @@ MODULE_DEVICE_TABLE(of, sel4_vhci_match);
 #endif
 
 static struct platform_driver vhci_driver = {
-	.probe	   = sel4_vhci_probe,
+	.probe	  = sel4_vhci_probe,
 	.remove	  = sel4_vhci_remove,
 	.shutdown	= usb_hcd_platform_shutdown,
 	.driver = {
