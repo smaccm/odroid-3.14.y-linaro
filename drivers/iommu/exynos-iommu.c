@@ -1536,8 +1536,8 @@ static int sysmmu_pm_genpd_restore_state(struct device *dev)
 }
 #endif
 
-#ifdef CONFIG_PM_GENERIC_DOMAINS
 struct gpd_dev_ops sysmmu_devpm_ops = {
+#ifdef CONFIG_PM_GENERIC_DOMAINS
 #ifdef CONFIG_PM_RUNTIME
 	.save_state = &sysmmu_pm_genpd_save_state,
 	.restore_state = &sysmmu_pm_genpd_restore_state,
@@ -1546,8 +1546,8 @@ struct gpd_dev_ops sysmmu_devpm_ops = {
 	.suspend = &sysmmu_pm_genpd_suspend,
 	.resume = &sysmmu_pm_genpd_resume,
 #endif
-};
 #endif /* CONFIG_PM_GENERIC_DOMAINS */
+};
 
 static int sysmmu_hook_driver_register(struct notifier_block *nb,
 					unsigned long val,
