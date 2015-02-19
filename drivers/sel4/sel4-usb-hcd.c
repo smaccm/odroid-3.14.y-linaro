@@ -86,12 +86,35 @@
 #define DRIVER_AUTHOR "Alexander Kroh"
 #define DRIVER_DESC "USB 2.0 'Virtualised' Host Controller (VHCI) Driver"
 
+
 #define MAX_ACTIVE_URB   (0x1000 / sizeof(struct sel4urb))
-#define SURBSTS_PENDING  (1 << 0)
-#define SURBSTS_ACTIVE   (1 << 1)
-#define SURBSTS_COMPLETE (1 << 2)
 
+#define SURBT_PARAM_GET_TYPE(param) (((param) >> 30) & 0x3)
+#define SURBT_PARAM_GET_SIZE(param) (((param) >>  0) & 0x0fffffff)
+#define SURBT_PARAM_TYPE(type)      ((type) << 30)
+#define SURBT_PARAM_SIZE(size)      ((size) << 0)
 
+#define SURB_EPADDR_STATE_INVALID   (0 << 28)
+#define SURB_EPADDR_STATE_PENDING   (1 << 28)
+#define SURB_EPADDR_STATE_ACTIVE    (2 << 28)
+#define SURB_EPADDR_STATE_COMPLETE  (4 << 28)
+#define SURB_EPADDR_STATE_SUCCESS   (SURB_EPADDR_STATE_COMPLETE | (0 << 28))
+#define SURB_EPADDR_STATE_ERROR     (SURB_EPADDR_STATE_COMPLETE | (1 << 28))
+#define SURB_EPADDR_STATE_CANCELLED (SURB_EPADDR_STATE_COMPLETE | (2 << 28))
+#define SURB_EPADDR_STATE_MASK      (SURB_EPADDR_STATE_COMPLETE | (3 << 28))
+#define SURB_EPADDR_GET_STATE(x)    ((x) & SURB_EPADDR_STATE_MASK)
+#define SURB_EPADDR_GET_ADDR(x)     (((x) >>  0) & 0x7f)
+#define SURB_EPADDR_GET_HUB_ADDR(x) (((x) >>  7) & 0x7f)
+#define SURB_EPADDR_GET_HUB_PORT(x) (((x) >> 14) & 0x7f)
+#define SURB_EPADDR_GET_EP(x)       (((x) >> 21) & 0x0f)
+#define SURB_EPADDR_GET_SPEED(x)    (((x) >> 25) & 0x03)
+#define SURB_EPADDR_GET_DT(x)       (((x) >> 27) & 0x01)
+#define SURB_EPADDR_ADDR(x)         ((x) <<  0)
+#define SURB_EPADDR_HUB_ADDR(x)     ((x) <<  7)
+#define SURB_EPADDR_HUB_PORT(x)     ((x) << 14)
+#define SURB_EPADDR_EP(x)           ((x) << 21)
+#define SURB_EPADDR_SPEED(x)        ((x) << 25)
+#define SURB_EPADDR_DT              (1 << 27)
 
 const char* pipe_type_str(unsigned int pipe)
 {
@@ -171,24 +194,16 @@ static struct usb_hub_descriptor _hub_hub_desc = {
 
 struct sel4urbt {
 	uintptr_t paddr;
-	int size;
-	int type;
-	int res;
+	uint32_t param;
 } __packed;
 
 struct sel4urb {
-	uint8_t addr;
-	uint8_t hub_addr;
-	uint8_t hub_port;
-	uint8_t speed;
-	uint16_t ep;
-	uint16_t max_pkt;
-	int16_t rate_ms;
-	uint16_t nxact;
-	uint32_t dt;
+	uint32_t epaddr;
 	void	*token;
-	uint16_t urb_status;
+	uint16_t max_pkt;
+	uint16_t rate_ms;
 	uint16_t urb_bytes_remaining;
+	uint16_t nxact;
 	struct sel4urbt desc[2];
 } __packed;
 
@@ -218,13 +233,25 @@ struct vhci_hcd {
 	struct list_head urb_overflow;
 };
 
+static inline void
+surb_epaddr_change_state(struct sel4urb *u, uint32_t s)
+{
+	uint32_t e;
+	e = u->epaddr;
+	e &= ~SURB_EPADDR_STATE_MASK;
+	e |= s;
+	u->epaddr = e;
+}
+
+
 static struct sel4urb *surb_next_free(struct vhci_hcd *vhci, struct urb *urb)
 {
 	int start = vhci->surb_tail;
 	struct sel4urb *surb = NULL;
 	/* Since we may have an INT packet, we need to scan */
 	do {
-		if (vhci->data_regs->surb[vhci->surb_tail].urb_status == 0) {
+		uint32_t epaddr = vhci->data_regs->surb[vhci->surb_tail].epaddr;
+		if (SURB_EPADDR_GET_STATE(epaddr) == SURB_EPADDR_STATE_INVALID) {
 			surb = &vhci->data_regs->surb[vhci->surb_tail];
 			vhci->urb[vhci->surb_tail] = urb;
 			dvusb("Claiming SURB %d\n", vhci->surb_tail);
@@ -240,8 +267,10 @@ static int surb_next_complete(struct vhci_hcd *vhci)
 	int start = vhci->surb_head;
 	do {
 		int cur_idx = vhci->surb_head;
+		uint32_t status;
 		vhci->surb_head = (vhci->surb_head + 1) % MAX_ACTIVE_URB;
-		if (vhci->data_regs->surb[cur_idx].urb_status & SURBSTS_COMPLETE) {
+		status = SURB_EPADDR_GET_STATE(vhci->data_regs->surb[cur_idx].epaddr);
+		if (status & SURB_EPADDR_STATE_COMPLETE) {
 			dvusb("Releasing SURB %d\n", cur_idx);
 			return cur_idx;
 		}
@@ -315,73 +344,81 @@ vhci_endpoint_disable(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 
 static int urb_to_surb(struct urb *urb, struct sel4urb *surb, int data_toggle)
 {
+	uint32_t epaddr;
 	switch (usb_pipetype(urb->pipe)) {
 	case PIPE_CONTROL:
 	case PIPE_INTERRUPT:
 	case PIPE_BULK:
 		break;
 	case PIPE_ISOCHRONOUS:
-		dvusb("Isochronos packets not supported\n");
+		pr_err("Isochronos packets not supported\n");
 	default:
-		dvusb("Unknown pipe type\n");
+		pr_err("Unknown pipe type\n");
+		return -1;
 	}
-
-	surb->addr = usb_pipedevice(urb->pipe);
-	if (urb->dev->tt) {
-		surb->hub_addr = urb->dev->tt->hub->devnum;
-		surb->hub_port = urb->dev->ttport;
-	} else {
-		surb->hub_addr = 0;
-		surb->hub_port = 0;
-	}
-	surb->speed = urb->dev->speed;
-	surb->ep = usb_pipeendpoint(urb->pipe);
-	surb->max_pkt = max_packet(usb_maxpacket(urb->dev, urb->pipe, usb_pipeout(urb->pipe)));
-	surb->rate_ms = urb->interval;
-	surb->token = urb;
-	surb->urb_status = SURBSTS_PENDING;
-	surb->dt = data_toggle;
 
 	surb->nxact = 0;
 	if (urb->setup_packet) {
-		surb->nxact++;
+		uint32_t param;
+		param = SURBT_PARAM_TYPE(2) | SURBT_PARAM_SIZE(8);
 		surb->desc[0].paddr = urb->setup_dma;
-		surb->desc[0].size = 8;
-		surb->desc[0].type = -1;
+		surb->desc[0].param = param;
+		surb->nxact++;
 	}
 	if (urb->transfer_dma) {
+		uint32_t param;
+		param = SURBT_PARAM_TYPE(usb_pipein(urb->pipe) ? 0 : 1);
+		param |= SURBT_PARAM_SIZE(urb->transfer_buffer_length);
 		surb->desc[surb->nxact].paddr = urb->transfer_dma;
-		surb->desc[surb->nxact].size = urb->transfer_buffer_length;
-		surb->desc[surb->nxact].type = usb_pipein(urb->pipe) ? 0 : 1;
+		surb->desc[surb->nxact].param = param;
 		surb->nxact++;
 	}
+
+	surb->max_pkt = max_packet(usb_maxpacket(urb->dev, urb->pipe, usb_pipeout(urb->pipe)));
+	surb->rate_ms = urb->interval;
+	surb->token = urb;
+
+	epaddr = SURB_EPADDR_ADDR(usb_pipedevice(urb->pipe));
+	epaddr |= SURB_EPADDR_EP(usb_pipeendpoint(urb->pipe));
+	epaddr |= SURB_EPADDR_SPEED(urb->dev->speed);
+	if (urb->dev->tt) {
+		epaddr |= SURB_EPADDR_HUB_ADDR(urb->dev->tt->hub->devnum);
+		epaddr |= SURB_EPADDR_HUB_PORT(urb->dev->ttport);
+	}
+	if (data_toggle & 1)
+		epaddr |= SURB_EPADDR_DT;
+	surb->epaddr = epaddr;
+	surb_epaddr_change_state(surb, SURB_EPADDR_STATE_PENDING);
+
 	return 0;
 }
 
 static int surb_to_urb(struct sel4urb *surb, struct urb *urb)
 {
 	int status;
-	if (surb->urb_status != SURBSTS_COMPLETE) {
+	uint32_t surb_status = SURB_EPADDR_GET_STATE(surb->epaddr);
+	switch (surb_status) {
+	case SURB_EPADDR_STATE_PENDING:
+	case SURB_EPADDR_STATE_ACTIVE:
 		dvusb("INCOMPLETE URB\n");
 		status = -EINPROGRESS;
-	}else if (urb->transfer_buffer) {
-		if (surb->urb_status >= 0) {
-			urb->actual_length = urb->transfer_buffer_length - surb->urb_bytes_remaining;
-			status = 0;
-		} else {
-			urb->actual_length = 0;
-			status = -1;
-		}
-		dvusb("Returning URB, status: 0x%x remaining: 0x%x, length %d actual length %d\n",
-				surb->urb_status, surb->urb_bytes_remaining, urb->transfer_buffer_length,
-				urb->actual_length);
-	} else {
-		urb->actual_length = 0;
+		break;
+	case SURB_EPADDR_STATE_SUCCESS:
 		status = 0;
-		dvusb("Returning URB, status: 0x%x remaining: 0x%x, length %d actual length %d\n",
-				surb->urb_status, surb->urb_bytes_remaining, urb->transfer_buffer_length,
-				urb->actual_length);
+		if (urb->transfer_buffer)
+			urb->actual_length = urb->transfer_buffer_length - surb->urb_bytes_remaining;
+		else
+			urb->actual_length = 0;
+		break;
+	case SURB_EPADDR_STATE_ERROR:
+	case SURB_EPADDR_STATE_CANCELLED:
+	default:
+		urb->actual_length = 0;
+		status = -EIO;
+		break;
 	}
+	dvusb("Returning URB, status: 0x%x length %d actual length %d\n",
+		surb_status, urb->transfer_buffer_length, urb->actual_length);
 	return status;
 }
 
@@ -435,12 +472,9 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 			struct urb *urb = vhci->urb[idx];
 			int status;
 			status = surb_to_urb(surb, urb);
-			if (status)
-				dvusb("vhci IRQ: Failed to finalise URB!\n");
 
+			surb->epaddr = 0;
 			usb_hcd_unlink_urb_from_ep(hcd, urb);
-			usb_hcd_giveback_urb(hcd, urb, status);
-			surb->urb_status = 0;
 			/* If the list attached to this EP is not empty,
 			 * we need to schedule the next */
 			if (!list_empty(&urb->ep->urb_list)) {
@@ -449,6 +483,7 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 				if (ret)
 					dvusb("vhci Failed to chain URB\n");
 			}
+			usb_hcd_giveback_urb(hcd, urb, status);
 		}
 	}
 	return IRQ_HANDLED;
@@ -503,7 +538,6 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	unsigned long flags;
 	int i = 0;
 	int ret = 0;
-	note("%s:%d\n", __func__, __LINE__);
 	printk(CFRED "Dequeue request for URB @ %p" CNORMAL "\n", urb);
 
 	spin_lock_irqsave(&vhci->lock, flags);
@@ -513,17 +547,13 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		if (vhci->urb[i] == urb) {
 			struct sel4urb *surb = &vhci->data_regs->surb[i];
 			struct urb *urb = vhci->urb[i];
-			int status;
 			vhci->ctrl_regs->cancel_transaction = i;
-			status = surb_to_urb(surb, urb);
-			if (status)
-				dvusb("vhci IRQ: Failed to finalise URB!\n");
-
+			surb_to_urb(surb, urb);
 			ret = usb_hcd_check_unlink_urb(hcd, urb, status);
 			if (ret == 0) {
 				usb_hcd_unlink_urb_from_ep(hcd, urb);
 				usb_hcd_giveback_urb(hcd, urb, status);
-				surb->urb_status = 0;
+				surb->epaddr = 0;
 			}
 
 			break;
