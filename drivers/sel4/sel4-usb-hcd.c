@@ -303,13 +303,6 @@ static void __exit vhci_hcd_cleanup(void)
 }
 module_exit(vhci_hcd_cleanup);
 
-static void vhci_stop(struct usb_hcd *hcd)
-{
-	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
-	(void)vhci;
-	note("%s:%d\n", __func__, __LINE__);
-}
-
 static int vhci_run(struct usb_hcd *hcd)
 {
 	return 0;
@@ -327,19 +320,6 @@ int vhci_setup(struct usb_hcd *hcd)
 	INIT_LIST_HEAD(&vhci->urb_overflow);
 
 	return 0;
-}
-
-static void vhci_shutdown(struct usb_hcd *hcd)
-{
-	(void)hcd;
-	note("%s:%d\n", __func__, __LINE__);
-}
-
-static void
-vhci_endpoint_disable(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
-{
-	(void)hcd;
-	(void)ep;
 }
 
 static int urb_to_surb(struct urb *urb, struct sel4urb *surb, int data_toggle)
@@ -542,22 +522,23 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
-	/* TODO also scan overflow list */
-	for (i = 0; i < MAX_ACTIVE_URB; i++) {
-		if (vhci->urb[i] == urb) {
-			struct sel4urb *surb = &vhci->data_regs->surb[i];
-			struct urb *urb = vhci->urb[i];
-			vhci->ctrl_regs->cancel_transaction = i;
-			surb_to_urb(surb, urb);
-			ret = usb_hcd_check_unlink_urb(hcd, urb, status);
-			if (ret == 0) {
-				usb_hcd_unlink_urb_from_ep(hcd, urb);
-				usb_hcd_giveback_urb(hcd, urb, status);
+	if (urb == list_first_entry(&urb->ep->urb_list, struct urb, urb_list)) {
+		for (i = 0; i < MAX_ACTIVE_URB; i++) {
+			if (vhci->urb[i] == urb) {
+				struct sel4urb *surb = &vhci->data_regs->surb[i];
+				struct urb *urb = vhci->urb[i];
+				vhci->ctrl_regs->cancel_transaction = i;
+				surb_to_urb(surb, urb);
 				surb->epaddr = 0;
+				break;
 			}
-
-			break;
 		}
+	}
+
+	ret = usb_hcd_check_unlink_urb(hcd, urb, status);
+	if (ret == 0) {
+		usb_hcd_unlink_urb_from_ep(hcd, urb);
+		usb_hcd_giveback_urb(hcd, urb, status);
 	}
 
 	spin_unlock_irqrestore(&vhci->lock, flags);
@@ -570,6 +551,7 @@ vhci_endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 {
 	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
 	unsigned long flags;
+//	note("%s:%d\n", __func__, __LINE__);
 	spin_lock_irqsave(&vhci->lock, flags);
 	ep->hcpriv = NULL;
 	spin_unlock_irqrestore(&vhci->lock, flags);
@@ -658,6 +640,27 @@ static int vhci_hub_control(
 	spin_unlock_irqrestore(&vhci->lock, flags);
 
 	return retval;
+}
+
+static void vhci_stop(struct usb_hcd *hcd)
+{
+	struct vhci_hcd *vhci = hcd_to_vhci(hcd);
+	(void)vhci;
+	note("%s:%d\n", __func__, __LINE__);
+}
+
+static void vhci_shutdown(struct usb_hcd *hcd)
+{
+	(void)hcd;
+	note("%s:%d\n", __func__, __LINE__);
+}
+
+static void
+vhci_endpoint_disable(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
+{
+	(void)hcd;
+	(void)ep;
+//	note("%s:%d\n", __func__, __LINE__);
 }
 
 static int vhci_bus_suspend(struct usb_hcd *hcd)
