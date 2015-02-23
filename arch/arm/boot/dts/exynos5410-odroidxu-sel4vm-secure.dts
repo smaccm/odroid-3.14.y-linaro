@@ -112,12 +112,6 @@
 		clock-names = "uart", "clk_uart_baud0";
 	};
 
-	firmware@02073000 {
-		compatible = "samsung,secure-firmware";
-		reg = <0x02073000 0x1000>;
-	};
-
-
 	mmc_0: mmc@12200000 {
 		compatible = "samsung,exynos5250-dw-mshc";
 		interrupts = <0 75 0>;
