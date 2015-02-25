@@ -27,7 +27,7 @@
 	interrupt-parent = <&gic>;
 
 	chosen {
-		bootargs = "console=ttySAC2,115200n8 console=tty1 root=/dev/mmcblk1p2 rootwait rw debug loglevel=7 text";
+		bootargs = "console=ttySAC2,115200n8 console=tty1 root=/dev/mmcblk0p2 rootwait rw debug loglevel=7 text";
 	};
 
 	aliases {
