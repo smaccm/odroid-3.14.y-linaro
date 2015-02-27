@@ -225,6 +225,7 @@ struct vhci_hcd {
 	struct vusb_ctrl_regs *ctrl_regs;
 	struct vusb_data_regs *data_regs;
 	struct urb *urb[MAX_ACTIVE_URB];
+	int status[MAX_ACTIVE_URB];
 	/* Represents the index of the first in flight urb */
 	int surb_head;
 	/* Represents the index of the next entry to attempt to consume */
@@ -371,7 +372,7 @@ static int urb_to_surb(struct urb *urb, struct sel4urb *surb, int data_toggle)
 	return 0;
 }
 
-static int surb_to_urb(struct sel4urb *surb, struct urb *urb)
+static int surb_to_urb(struct sel4urb *surb, struct urb *urb, int cancel_status)
 {
 	int status;
 	uint32_t surb_status = SURB_EPADDR_GET_STATE(surb->epaddr);
@@ -391,7 +392,7 @@ static int surb_to_urb(struct sel4urb *surb, struct urb *urb)
 	case SURB_EPADDR_STATE_ERROR:
 	case SURB_EPADDR_STATE_CANCELLED:
 		urb->actual_length = 0;
-		status = -EIO;
+		status = cancel_status;
 		break;
 	default:
 		pr_err("Invalid URB state! 0x%x\n", surb_status);
@@ -451,7 +452,14 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 			struct urb *urb = vhci->urb[idx];
 			int status;
 			int ret;
-			status = surb_to_urb(surb, urb);
+			status = surb_to_urb(surb, urb, vhci->status[idx]);
+			if (status) {
+				/* Untoggle */
+				int new_hcpriv;
+				new_hcpriv = (uint32_t)urb->ep->hcpriv;
+				urb->ep->hcpriv = (void *)(new_hcpriv ^ 1);
+				status = vhci->status[idx];
+			}
 
 			surb->epaddr = 0;
 			vhci->urb[idx] = NULL;
@@ -530,35 +538,26 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	spin_lock_irqsave(&vhci->lock, flags);
 
 	if (urb == list_first_entry(&urb->ep->urb_list, struct urb, urb_list)) {
+		/* Cancel the transaction. An IRQ tells us when to clean up */
 		for (i = 0; i < MAX_ACTIVE_URB; i++) {
 			if (vhci->urb[i] == urb) {
 				struct sel4urb *surb = &vhci->data_regs->surb[i];
 				vhci->ctrl_regs->cancel_transaction = i;
-				surb_to_urb(surb, urb);
-				surb->epaddr = 0;
-				vhci->urb[i] = NULL;
+				vhci->status[i] = status;
 				break;
 			}
 		}
 		if (i == MAX_ACTIVE_URB)
 			pr_err("Could not find SURB for dequeue\n");
+	} else {
+		/* Not queued. Just unlink it */
+		ret = usb_hcd_check_unlink_urb(hcd, urb, status);
+		if (ret == 0) {
+			usb_hcd_unlink_urb_from_ep(hcd, urb);
+			usb_hcd_giveback_urb(hcd, urb, status);
+		} else
+			pr_err("Failed to unlink urb!\n");
 	}
-
-	ret = usb_hcd_check_unlink_urb(hcd, urb, status);
-	if (ret == 0) {
-		struct usb_host_endpoint *ep = urb->ep;
-		usb_hcd_unlink_urb_from_ep(hcd, urb);
-		usb_hcd_giveback_urb(hcd, urb, status);
-		/* If the list attached to this EP is not empty,
-		 * we need to schedule the next */
-		if (!list_empty(&ep->urb_list)) {
-			int ret;
-			ret = vhci_schedule_urb(vhci, ep);
-			if (ret)
-				dvusb("vhci Failed to chain URB\n");
-		}
-	} else
-		pr_err("Failed to unlink urb!\n");
 
 	spin_unlock_irqrestore(&vhci->lock, flags);
 
