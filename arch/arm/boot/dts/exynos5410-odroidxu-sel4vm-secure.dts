@@ -35,7 +35,7 @@
 
 	memory {
 		device_type = "memory";
-		reg = <0x40000000 0x10000000>;
+		reg = <0x40000000 0x20000000>;
 	};
 
 	chipid@10000000 {
@@ -86,11 +86,39 @@
 		clock-frequency = <24000000>;
 	};
 
+#if 1
+
 	usb@33330000 {
 		compatible = "sel4,vhci";
 		reg = <0x33330000 0x2000>;
 		interrupts = <0 166 0>;
 	};
+
+#else
+	usb@12110000 {
+		compatible = "samsung,exynos4210-ehci";
+		reg = <0x12110000 0x100>;
+		interrupts = <0 71 0>;
+
+		clocks = <&clock CLK_USBH20>;
+		clock-names = "usbhost";
+	};
+	usb2_phy: usbphy@12130000 {
+		compatible = "samsung,exynos5250-usb2phy";
+		reg = <0x12130000 0x100>;
+		clocks = <&clock CLK_FIN_PLL>, <&clock CLK_USBH20>;
+		clock-names = "ext_xtal", "usbhost";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		usbphy-sys {
+			reg = <0x10040704 0xc>,
+			      <0x10050230 0x4>;
+		};
+	};
+
+#endif
 
 // These ports here just to be consistent with device ID
 	serial@12C00000 {
