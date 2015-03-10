@@ -385,11 +385,11 @@ static int surb_to_urb(struct sel4urb *surb, struct urb *urb, int cancel_status)
 		status = -EINPROGRESS;
 		break;
 	case SURB_EPADDR_STATE_SUCCESS:
-		status = 0;
 		if (urb->transfer_buffer)
 			urb->actual_length = urb->transfer_buffer_length - surb->urb_bytes_remaining;
 		else
 			urb->actual_length = 0;
+		status = 0;
 		break;
 	case SURB_EPADDR_STATE_ERROR:
 		if (urb->transfer_buffer)
@@ -426,13 +426,13 @@ vhci_schedule_urb(struct vhci_hcd *vhci, struct usb_host_endpoint *ep)
 		/* Fill the sel4 URB descriptor */
 		int dt;
 		int ret;
-		if(urb->setup_dma == 0)
+		if (urb->setup_dma == 0)
 			/* Retrieve the current data toggle */
 			dt = (int)urb->ep->hcpriv & 0x1;
 		else
 			/* Always zero for setup packets */
 			dt = 0;
-		
+
 		ret = urb_to_surb(urb, surb, dt);
 		if (!ret)
 #if 1
@@ -466,9 +466,15 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 			int status;
 			int ret;
 			status = surb_to_urb(surb, urb, vhci->status[idx]);
+
 			/* Adjust data toggle */
 			max_pkt = urb->ep->desc.wMaxPacketSize;
-			urb->ep->hcpriv += (urb->actual_length + max_pkt - 1) / max_pkt;
+			urb->ep->hcpriv += DIV_ROUND_UP(urb->actual_length, max_pkt);
+			/* If PID is OUT and length is a multiple of max_pkt, then we
+			 * have also sent an empty packet. */
+			if (usb_endpoint_dir_out(&urb->ep->desc) && urb->actual_length &&
+					(urb->actual_length % max_pkt) == 0)
+				urb->ep->hcpriv++;
 
 			surb->epaddr = 0;
 			vhci->urb[idx] = NULL;
@@ -543,7 +549,8 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	int i = 0;
 	int ret = 0;
 	printk(CFRED "Dequeue request for URB @ %p" CNORMAL "\n", urb);
-
+	/* First handle any completions in case IRQs are disabled */
+	vhci_irq(hcd);
 	spin_lock_irqsave(&vhci->lock, flags);
 
 	if (urb == list_first_entry(&urb->ep->urb_list, struct urb, urb_list)) {
@@ -552,6 +559,7 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 			if (vhci->urb[i] == urb) {
 				vhci->ctrl_regs->cancel_transaction = i;
 				vhci->status[i] = status;
+				ret = -EINPROGRESS;
 				break;
 			}
 		}
