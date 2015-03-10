@@ -254,7 +254,8 @@ static struct sel4urb *surb_next_free(struct vhci_hcd *vhci, struct urb *urb)
 		if (SURB_EPADDR_GET_STATE(epaddr) == SURB_EPADDR_STATE_INVALID) {
 			surb = &vhci->data_regs->surb[vhci->surb_tail];
 			vhci->urb[vhci->surb_tail] = urb;
-			dvusb("Claiming SURB %d\n", vhci->surb_tail);
+			dvusb("Claiming SURB %d for URB 0x%x length %d\n", vhci->surb_tail,
+				(uint32_t)urb, vhci->urb[vhci->surb_tail]->transfer_buffer_length);
 			return surb;
 		}
 		vhci->surb_tail = (vhci->surb_tail + 1) % MAX_ACTIVE_URB;
@@ -271,7 +272,8 @@ static int surb_next_complete(struct vhci_hcd *vhci)
 		vhci->surb_head = (vhci->surb_head + 1) % MAX_ACTIVE_URB;
 		status = SURB_EPADDR_GET_STATE(vhci->data_regs->surb[cur_idx].epaddr);
 		if (status & SURB_EPADDR_STATE_COMPLETE) {
-			dvusb("Releasing SURB %d\n", cur_idx);
+			dvusb("Releasing SURB %d for URB 0x%x length %d\n", cur_idx,
+				(uint32_t)vhci->urb[cur_idx], vhci->urb[cur_idx]->transfer_buffer_length);
 			return cur_idx;
 		}
 	} while (vhci->surb_head != start);
@@ -390,6 +392,10 @@ static int surb_to_urb(struct sel4urb *surb, struct urb *urb, int cancel_status)
 			urb->actual_length = 0;
 		break;
 	case SURB_EPADDR_STATE_ERROR:
+		if (urb->transfer_buffer)
+			urb->actual_length = urb->transfer_buffer_length - surb->urb_bytes_remaining;
+		status = -EPIPE;
+		break;
 	case SURB_EPADDR_STATE_CANCELLED:
 		urb->actual_length = 0;
 		status = cancel_status;
@@ -418,12 +424,18 @@ vhci_schedule_urb(struct vhci_hcd *vhci, struct usb_host_endpoint *ep)
 		return -1;
 	} else {
 		/* Fill the sel4 URB descriptor */
-		int dt = (int)urb->ep->hcpriv;
+		int dt;
 		int ret;
-		urb->ep->hcpriv++;
+		if(urb->setup_dma == 0)
+			/* Retrieve the current data toggle */
+			dt = (int)urb->ep->hcpriv & 0x1;
+		else
+			/* Always zero for setup packets */
+			dt = 0;
+		
 		ret = urb_to_surb(urb, surb, dt);
 		if (!ret)
-#if 0
+#if 1
 			seL4_Notify(5);
 #else
 			vhci->ctrl_regs->notify = 0;
@@ -450,16 +462,13 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 		} else {
 			struct sel4urb *surb = &vhci->data_regs->surb[idx];
 			struct urb *urb = vhci->urb[idx];
+			int max_pkt;
 			int status;
 			int ret;
 			status = surb_to_urb(surb, urb, vhci->status[idx]);
-			if (status) {
-				/* Untoggle */
-				int new_hcpriv;
-				new_hcpriv = (uint32_t)urb->ep->hcpriv;
-				urb->ep->hcpriv = (void *)(new_hcpriv ^ 1);
-				status = vhci->status[idx];
-			}
+			/* Adjust data toggle */
+			max_pkt = urb->ep->desc.wMaxPacketSize;
+			urb->ep->hcpriv += (urb->actual_length + max_pkt - 1) / max_pkt;
 
 			surb->epaddr = 0;
 			vhci->urb[idx] = NULL;
@@ -541,7 +550,6 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		/* Cancel the transaction. An IRQ tells us when to clean up */
 		for (i = 0; i < MAX_ACTIVE_URB; i++) {
 			if (vhci->urb[i] == urb) {
-				struct sel4urb *surb = &vhci->data_regs->surb[i];
 				vhci->ctrl_regs->cancel_transaction = i;
 				vhci->status[i] = status;
 				break;
