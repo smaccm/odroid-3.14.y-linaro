@@ -121,9 +121,9 @@ const char* pipe_type_str(unsigned int pipe)
 	switch (usb_pipetype(pipe)) {
 	case PIPE_ISOCHRONOUS: return "isoc";
 	case PIPE_INTERRUPT:   return "int ";
-	case PIPE_CONTROL:	 return "ctrl";
-	case PIPE_BULK:		return "bulk";
-	default:			   return "????";
+	case PIPE_CONTROL:     return "ctrl";
+	case PIPE_BULK:        return "bulk";
+	default:               return "????";
 	}
 }
 
@@ -199,7 +199,6 @@ struct sel4urbt {
 
 struct sel4urb {
 	uint32_t epaddr;
-	void	*token;
 	uint16_t max_pkt;
 	uint16_t rate_ms;
 	uint16_t urb_bytes_remaining;
@@ -226,6 +225,7 @@ struct vhci_hcd {
 	struct vusb_ctrl_regs *ctrl_regs;
 	struct vusb_data_regs *data_regs;
 	struct urb *urb[MAX_ACTIVE_URB];
+	int status[MAX_ACTIVE_URB];
 	/* Represents the index of the first in flight urb */
 	int surb_head;
 	/* Represents the index of the next entry to attempt to consume */
@@ -254,7 +254,8 @@ static struct sel4urb *surb_next_free(struct vhci_hcd *vhci, struct urb *urb)
 		if (SURB_EPADDR_GET_STATE(epaddr) == SURB_EPADDR_STATE_INVALID) {
 			surb = &vhci->data_regs->surb[vhci->surb_tail];
 			vhci->urb[vhci->surb_tail] = urb;
-			dvusb("Claiming SURB %d\n", vhci->surb_tail);
+			dvusb("Claiming SURB %d for URB 0x%x length %d\n", vhci->surb_tail,
+				(uint32_t)urb, vhci->urb[vhci->surb_tail]->transfer_buffer_length);
 			return surb;
 		}
 		vhci->surb_tail = (vhci->surb_tail + 1) % MAX_ACTIVE_URB;
@@ -271,7 +272,8 @@ static int surb_next_complete(struct vhci_hcd *vhci)
 		vhci->surb_head = (vhci->surb_head + 1) % MAX_ACTIVE_URB;
 		status = SURB_EPADDR_GET_STATE(vhci->data_regs->surb[cur_idx].epaddr);
 		if (status & SURB_EPADDR_STATE_COMPLETE) {
-			dvusb("Releasing SURB %d\n", cur_idx);
+			dvusb("Releasing SURB %d for URB 0x%x length %d\n", cur_idx,
+				(uint32_t)vhci->urb[cur_idx], vhci->urb[cur_idx]->transfer_buffer_length);
 			return cur_idx;
 		}
 	} while (vhci->surb_head != start);
@@ -356,7 +358,6 @@ static int urb_to_surb(struct urb *urb, struct sel4urb *surb, int data_toggle)
 
 	surb->max_pkt = max_packet(usb_maxpacket(urb->dev, urb->pipe, usb_pipeout(urb->pipe)));
 	surb->rate_ms = urb->interval;
-	surb->token = urb;
 
 	epaddr = SURB_EPADDR_ADDR(usb_pipedevice(urb->pipe));
 	epaddr |= SURB_EPADDR_EP(usb_pipeendpoint(urb->pipe));
@@ -373,7 +374,7 @@ static int urb_to_surb(struct urb *urb, struct sel4urb *surb, int data_toggle)
 	return 0;
 }
 
-static int surb_to_urb(struct sel4urb *surb, struct urb *urb)
+static int surb_to_urb(struct sel4urb *surb, struct urb *urb, int cancel_status)
 {
 	int status;
 	uint32_t surb_status = SURB_EPADDR_GET_STATE(surb->epaddr);
@@ -384,18 +385,24 @@ static int surb_to_urb(struct sel4urb *surb, struct urb *urb)
 		status = -EINPROGRESS;
 		break;
 	case SURB_EPADDR_STATE_SUCCESS:
-		status = 0;
 		if (urb->transfer_buffer)
 			urb->actual_length = urb->transfer_buffer_length - surb->urb_bytes_remaining;
 		else
 			urb->actual_length = 0;
+		status = 0;
 		break;
 	case SURB_EPADDR_STATE_ERROR:
-	case SURB_EPADDR_STATE_CANCELLED:
-	default:
-		urb->actual_length = 0;
-		status = -EIO;
+		if (urb->transfer_buffer)
+			urb->actual_length = urb->transfer_buffer_length - surb->urb_bytes_remaining;
+		status = -EPIPE;
 		break;
+	case SURB_EPADDR_STATE_CANCELLED:
+		urb->actual_length = 0;
+		status = cancel_status;
+		break;
+	default:
+		pr_err("Invalid URB state! 0x%x\n", surb_status);
+		status = -EIO;
 	}
 	dvusb("Returning URB, status: 0x%x length %d actual length %d\n",
 		surb_status, urb->transfer_buffer_length, urb->actual_length);
@@ -417,18 +424,24 @@ vhci_schedule_urb(struct vhci_hcd *vhci, struct usb_host_endpoint *ep)
 		return -1;
 	} else {
 		/* Fill the sel4 URB descriptor */
-		int dt = (int)urb->ep->hcpriv;
+		int dt;
 		int ret;
-		urb->ep->hcpriv++;
+		if (urb->setup_dma == 0)
+			/* Retrieve the current data toggle */
+			dt = (int)urb->ep->hcpriv & 0x1;
+		else
+			/* Always zero for setup packets */
+			dt = 0;
+
 		ret = urb_to_surb(urb, surb, dt);
 		if (!ret)
-#if 0
+#if 1
 			seL4_Notify(5);
 #else
 			vhci->ctrl_regs->notify = 0;
 #endif
 		else
-			dvusb("URB translation error\n");
+			pr_err("URB translation error\n");
 		return ret;
 	}
 }
@@ -445,27 +458,45 @@ static irqreturn_t vhci_irq(struct usb_hcd *hcd)
 		idx = surb_next_complete(vhci);
 
 		if (idx < 0) {
-			spin_unlock_irqrestore(&vhci->lock, flags);
-			return IRQ_HANDLED;
+			break;
 		} else {
 			struct sel4urb *surb = &vhci->data_regs->surb[idx];
 			struct urb *urb = vhci->urb[idx];
+			int max_pkt;
 			int status;
-			status = surb_to_urb(surb, urb);
+			int ret;
+			status = surb_to_urb(surb, urb, vhci->status[idx]);
+
+			/* Adjust data toggle */
+			max_pkt = urb->ep->desc.wMaxPacketSize;
+			urb->ep->hcpriv += DIV_ROUND_UP(urb->actual_length, max_pkt);
+			/* If PID is OUT and length is a multiple of max_pkt, then we
+			 * have also sent an empty packet. */
+			if (usb_endpoint_dir_out(&urb->ep->desc) && urb->actual_length &&
+					(urb->actual_length % max_pkt) == 0)
+				urb->ep->hcpriv++;
 
 			surb->epaddr = 0;
-			usb_hcd_unlink_urb_from_ep(hcd, urb);
-			/* If the list attached to this EP is not empty,
-			 * we need to schedule the next */
-			if (!list_empty(&urb->ep->urb_list)) {
-				int ret;
-				ret = vhci_schedule_urb(vhci, urb->ep);
-				if (ret)
-					dvusb("vhci Failed to chain URB\n");
-			}
-			usb_hcd_giveback_urb(hcd, urb, status);
+			vhci->urb[idx] = NULL;
+
+			ret = usb_hcd_check_unlink_urb(hcd, urb, status);
+			if (ret == 0) {
+				struct usb_host_endpoint *ep = urb->ep;
+				usb_hcd_unlink_urb_from_ep(hcd, urb);
+				usb_hcd_giveback_urb(hcd, urb, status);
+				/* If the list attached to this EP is not empty,
+				 * we need to schedule the next */
+				if (!list_empty(&ep->urb_list)) {
+					int ret;
+					ret = vhci_schedule_urb(vhci, ep);
+					if (ret)
+						dvusb("vhci Failed to chain URB\n");
+				}
+			} else
+				pr_err("Failed to unlink urb!\n");
 		}
 	}
+	spin_unlock_irqrestore(&vhci->lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -496,10 +527,9 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 	spin_lock_irqsave(&vhci->lock, flags);
 
 	ep_was_idle = list_empty(&urb->ep->urb_list);
-	urb->unlinked = 0;
 	ret = usb_hcd_link_urb_to_ep(hcd, urb);
 	if (ret)
-		dvusb("link error\n");
+		pr_err("link error\n");
 	else if (ep_was_idle)
 		/* seL4 data toggle management is incompatible with that of
 		 * Linux. If there is already a queued transfer, simply add
@@ -519,26 +549,30 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	int i = 0;
 	int ret = 0;
 	printk(CFRED "Dequeue request for URB @ %p" CNORMAL "\n", urb);
-
+	/* First handle any completions in case IRQs are disabled */
+	vhci_irq(hcd);
 	spin_lock_irqsave(&vhci->lock, flags);
 
 	if (urb == list_first_entry(&urb->ep->urb_list, struct urb, urb_list)) {
+		/* Cancel the transaction. An IRQ tells us when to clean up */
 		for (i = 0; i < MAX_ACTIVE_URB; i++) {
 			if (vhci->urb[i] == urb) {
-				struct sel4urb *surb = &vhci->data_regs->surb[i];
-				struct urb *urb = vhci->urb[i];
 				vhci->ctrl_regs->cancel_transaction = i;
-				surb_to_urb(surb, urb);
-				surb->epaddr = 0;
+				vhci->status[i] = status;
+				ret = -EINPROGRESS;
 				break;
 			}
 		}
-	}
-
-	ret = usb_hcd_check_unlink_urb(hcd, urb, status);
-	if (ret == 0) {
-		usb_hcd_unlink_urb_from_ep(hcd, urb);
-		usb_hcd_giveback_urb(hcd, urb, status);
+		if (i == MAX_ACTIVE_URB)
+			pr_err("Could not find SURB for dequeue\n");
+	} else {
+		/* Not queued. Just unlink it */
+		ret = usb_hcd_check_unlink_urb(hcd, urb, status);
+		if (ret == 0) {
+			usb_hcd_unlink_urb_from_ep(hcd, urb);
+			usb_hcd_giveback_urb(hcd, urb, status);
+		} else
+			pr_err("Failed to unlink urb!\n");
 	}
 
 	spin_unlock_irqrestore(&vhci->lock, flags);
