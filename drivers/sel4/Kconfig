@@ -21,4 +21,12 @@ config SEL4_USB
 	help
 	  A USB host controller driver for seL4 virtio USB components.
 
+config SEL4_VCHAN
+	bool "seL4 vchan"
+	depends on SEL4
+	default y
+	help
+	  By selecting this option, a kernel driver
+	  will be built to allow vchan calls into hypervisor.
+
 endmenu
