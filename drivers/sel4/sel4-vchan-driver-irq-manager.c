@@ -24,18 +24,19 @@
 */
 typedef struct event_instance {
     int port, domain, self; /* vchan connection */
-    int wait_type; /* What is this instance interested in */
-    size_t request_size; /* How much data is needed for the instance to be satisfied */
     /*
         Value linked to hypervisor,
             hypervisor changes this value whenever the status of the vchan buffer changes
     */
     vchan_alert_t *event_mon;
-
-    struct completion wait; /* Used for sleeping threads */
-    struct eventfd_ctx *efd_ctx; /* Used for pinging an user level eventfd */
+    /*
+        Used for pinging an user level eventfd
+            FIXME: this is currently unsupported
+    */
+    struct eventfd_ctx *efd_ctx;
     struct list_head node;
 } einstance_t;
+
 
 static struct vchan_event_control {
     int num_instances;
@@ -51,13 +52,15 @@ static struct vchan_event_control {
     .num_instances = 0,
 };
 
-static uint64_t plus_one = 1;
+DECLARE_WAIT_QUEUE_HEAD(vchan_wait_queue);
 
-static int check_valid_action(einstance_t *inst, size_t request_size);
+// static uint64_t plus_one = 1;
+
+static int check_valid_action(int domain, int port, int type, size_t request_size);
 static irqreturn_t event_irq_handler(int, void *);
 static void event_thread_run(struct work_struct *work);
-einstance_t *get_event_instance(int domain, int port);
-void print_inst(void);
+static einstance_t *get_event_instance(int domain, int port);
+static void print_inst(void);
 
 /*
     Bottom half interrupt handler
@@ -145,8 +148,6 @@ int new_event_instance(int domain, int port, int eventfd, vchan_alert_t *mon, in
     vchan_ctrl.num_instances++;
     inst->domain = domain;
     inst->port = port;
-    inst->request_size = 0;
-    inst->wait_type = VCHAN_RECV;
     inst->event_mon = mon;
     inst->self = self;
 
@@ -162,8 +163,6 @@ int new_event_instance(int domain, int port, int eventfd, vchan_alert_t *mon, in
 
     inst->efd_ctx = eventfd_ctx_fileget(efd_file);
     BUG_ON(inst->efd_ctx == NULL);
-
-    init_completion(&(inst->wait));
 
     /* Add to the instance list */
     INIT_LIST_HEAD(&inst->node);
@@ -202,13 +201,31 @@ void rem_event_instance(int domain, int port) {
     up(&vchan_ctrl.inst_sem);
 }
 
+static vchan_alert_t *get_vchan_status(int domain, int port) {
+    einstance_t *inst;
+
+    inst = get_event_instance(domain, port);
+    if(inst == NULL) {
+        return NULL;
+    }
+
+    return inst->event_mon;
+}
+
 /*
     Check to see if the state of a given vchan is blocking or not
 */
-static int check_valid_action(einstance_t *inst, size_t request_size) {
-    vchan_alert_t *alrt = inst->event_mon;
+static int check_valid_action(int domain, int port, int type, size_t request_size) {
+    vchan_alert_t *alrt;
 
-    if(inst->wait_type == VCHAN_RECV) {
+    down(&vchan_ctrl.inst_sem);
+    alrt = get_vchan_status(domain, port);
+    if(alrt == NULL) {
+        up(&vchan_ctrl.inst_sem);
+        return -1;
+    }
+
+    if(type == VCHAN_RECV) {
         if(request_size <= alrt->data_ready) {
             return 1;
         } else if(alrt->is_closed) {
@@ -223,51 +240,47 @@ static int check_valid_action(einstance_t *inst, size_t request_size) {
             return -1;
         }
     }
+    up(&vchan_ctrl.inst_sem);
 
     return 0;
+}
+
+int event_thread_info(int domain, int port, int type) {
+    int rval;
+    vchan_alert_t *alrt;
+
+    down(&vchan_ctrl.inst_sem);
+    alrt = get_vchan_status(domain, port);
+    if(alrt == NULL) {
+        up(&vchan_ctrl.inst_sem);
+        return -1;
+    }
+
+    if(type == NOWAIT_DATA_READY || type == VCHAN_RECV) {
+        rval = alrt->data_ready;
+    } else {
+        if(alrt->is_closed) {
+            rval = 0;
+        } else {
+            rval = alrt->buffer_space;
+        }
+    }
+
+    up(&vchan_ctrl.inst_sem);
+    return rval;
 }
 
 /*
     Top half interrupt handler for hypervisor state change interrupt
 */
 static void event_thread_run(struct work_struct *work) {
-    int alert;
-    einstance_t *inst, *next;
-    struct list_head *head = &vchan_ctrl.instances;
-
-    // printk("sel4-vchan-driver: checking for blocked threads to wake...\n");
-    down(&vchan_ctrl.inst_sem);
-        list_for_each_entry_safe(inst, next, head, node) {
-            if(!completion_done(&(inst->wait))) {
-                /* If a thread is waiting, see if its state is non-blocking */
-                alert = check_valid_action(inst, inst->request_size);
-                if(alert != 0 && inst->request_size != 0) {
-                        printk(KERN_DEBUG "sel4-vchan-driver: waking up thread on port |%d|\n", inst->port);
-                        int val = event_thread_info(inst->domain, inst->port, inst->wait_type);
-                        if(inst->wait_type == VCHAN_RECV) {
-                            printk(KERN_DEBUG "sel4-vchan-driver: read condition |%d|%d|\n", inst->request_size, val);
-                        } else {
-                            printk(KERN_DEBUG "sel4-vchan-driver: write condition |%d|%d|\n", inst->request_size, val);
-                        }
-                        eventfd_signal(inst->efd_ctx, plus_one);
-                        // inst->signaled = 1;
-                        complete(&(inst->wait));
-
-                    if(alert == -1) {
-                        list_del(&inst->node);
-                        eventfd_ctx_put(inst->efd_ctx);
-                        kfree(inst);
-                    }
-                }
-            }
-        }
-    up(&vchan_ctrl.inst_sem);
+    wake_up(&vchan_wait_queue);
 }
 
 /*
     Returns an event instance
 */
-einstance_t *get_event_instance(int domain, int port) {
+static einstance_t *get_event_instance(int domain, int port) {
     einstance_t *inst, *next;
     struct list_head *head = &vchan_ctrl.instances;
 
@@ -285,85 +298,37 @@ einstance_t *get_event_instance(int domain, int port) {
     Wait for a desired event to happen, blocking if it has not happened already
 */
 int wait_for_event(int domain, int port, int type, size_t request_size) {
-    einstance_t *inst;
-    int status = 0;
+    int vchan_info;
+    int status = check_valid_action(domain, port, type, request_size);;
 
-    down(&vchan_ctrl.inst_sem);
-
-    inst = get_event_instance(domain, port);
-    if(inst == NULL) {
-        printk(KERN_ALERT "sel4-vchan-driver event: failed to get inst\n");
-        return -1;
-    }
-
-    inst->wait_type = type;
-    status = check_valid_action(inst, request_size);
     /* Cannot perform action, vchan is closed */
     if(status < 0) {
-        // printk("sel4-vchan-driver event: bad status of %d\n", status);
+        printk(KERN_ALERT "sel4-vchan-driver event: bad status of %d\n", status);
         return -1;
     } else if(status == 0) {
         /* Vchan is blocking, sleep until non-block */
         printk(KERN_DEBUG "linux-sel4-vchan-driver: sleeping thread until action possible\n");
-        int vchan_info = event_thread_info(domain, port, type);
+        vchan_info = event_thread_info(domain, port, type);
         if(type == VCHAN_RECV) {
             printk(KERN_DEBUG "linux-sel4-vchan-driver: action: recv request:|%d| have:|%d|\n", request_size, vchan_info);
         } else {
             printk(KERN_DEBUG "linux-sel4-vchan-driver: action: send request:|%d| have:|%d|\n", request_size, vchan_info);
         }
 
-        // inst->signaled = 0;
-        inst->request_size = request_size;
-
-        up(&vchan_ctrl.inst_sem);
-
-        while(status == 0) {
-            wait_for_completion(&(inst->wait));
-            status = check_valid_action(inst, inst->request_size);
+        do {
+            wait_event(vchan_wait_queue, check_valid_action(domain, port, type, request_size) != 0);
+            status = check_valid_action(domain, port, type, request_size);
             printk(KERN_DEBUG "linux-sel4-vchan-driver: walking away now with %d..\n", status);
-        }
-
-    } else {
-        // inst->signaled = 1;
-        up(&vchan_ctrl.inst_sem);
+        } while(status == 0);
     }
-
-    inst->request_size = 0;
 
     return status;
 }
 
-int event_thread_info(int domain, int port, int type) {
-    int rval;
-    einstance_t *inst;
-
-    down(&vchan_ctrl.inst_sem);
-    inst = get_event_instance(domain, port);
-    if(inst == NULL) {
-        up(&vchan_ctrl.inst_sem);
-        return -1;
-    }
-
-    vchan_alert_t *alrt = inst->event_mon;
-    if(type == NOWAIT_DATA_READY || type == VCHAN_RECV) {
-        rval = alrt->data_ready;
-    } else {
-        if(alrt->is_closed) {
-            rval = 0;
-        } else {
-            rval = alrt->buffer_space;
-        }
-    }
-
-    up(&vchan_ctrl.inst_sem);
-    return rval;
-}
-
-
 /*
     Debug printing routine
 */
-void print_inst(void) {
+static void print_inst(void) {
     einstance_t *inst, *next;
     struct list_head *head = &vchan_ctrl.instances;
     printk("--I %d--\n", vchan_ctrl.num_instances);
