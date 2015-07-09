@@ -495,6 +495,8 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
     remaining = vchan_args->size;
     total = 0;
     while(remaining > 0) {
+        printk(KERN_DEBUG "sel4-vchan-driver: readwrite req: %d|%d size: %d|%d\n",
+                cmd, vchan_args->v.port, remaining, vchan_args->stream);
         vchan_args->mmap_phys_ptr = virt_to_phys(vchan_args->mmap_ptr + total);
         if(vchan_args->mmap_phys_ptr == 0) {
             printk("sel4-vchan-driver-readwrite: bad phys pointer\n");
@@ -529,7 +531,6 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
             remaining -= FILE_DATAPORT_MAX_SIZE;
     }
 
-
     send_size = total;
 
     if(cmd == VCHAN_RECV) {
@@ -540,8 +541,6 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
             return -EINVAL;
         }
     }
-
-    // printk("readwrite done: %d|%d size: %d\n", cmd, vchan_args->v.port, vchan_args->size);
 
     kfree(vchan_args->mmap_ptr);
     return send_size;

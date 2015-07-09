@@ -184,6 +184,7 @@ void rem_event_instance(int domain, int port) {
 
     list_for_each_entry_safe(inst, next, head, node) {
         if(inst->domain == domain && inst->port == port) {
+            printk(KERN_DEBUG "linux-sel4-vchan-driver: instance not found!\n");
             list_del(&inst->node);
             eventfd_ctx_put(inst->efd_ctx);
             /*
@@ -197,6 +198,8 @@ void rem_event_instance(int domain, int port) {
             return;
         }
     }
+
+    printk(KERN_DEBUG "linux-sel4-vchan-driver: instance not found!\n");
 
     up(&vchan_ctrl.inst_sem);
 }
@@ -310,9 +313,9 @@ int wait_for_event(int domain, int port, int type, size_t request_size) {
         printk(KERN_DEBUG "linux-sel4-vchan-driver: sleeping thread until action possible\n");
         vchan_info = event_thread_info(domain, port, type);
         if(type == VCHAN_RECV) {
-            printk(KERN_DEBUG "linux-sel4-vchan-driver: action: recv request:|%d| have:|%d|\n", request_size, vchan_info);
+            printk(KERN_DEBUG "linux-sel4-vchan-driver: action: recv request:|sz:%d| have:|%d|\n", request_size, vchan_info);
         } else {
-            printk(KERN_DEBUG "linux-sel4-vchan-driver: action: send request:|%d| have:|%d|\n", request_size, vchan_info);
+            printk(KERN_DEBUG "linux-sel4-vchan-driver: action: send request:|sz:%d| have:|%d|\n", request_size, vchan_info);
         }
 
         do {
