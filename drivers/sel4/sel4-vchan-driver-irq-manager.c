@@ -187,11 +187,7 @@ void rem_event_instance(int domain, int port) {
             printk(KERN_DEBUG "linux-sel4-vchan-driver: instance not found!\n");
             list_del(&inst->node);
             eventfd_ctx_put(inst->efd_ctx);
-            /*
-                FIXME this should be free'd
-                     but causes a kernel panic for some reason right now
-            */
-            // kfree(inst->event_mon);
+            kfree(inst->event_mon);
             kfree(inst);
             vchan_ctrl.num_instances--;
             up(&vchan_ctrl.inst_sem);
