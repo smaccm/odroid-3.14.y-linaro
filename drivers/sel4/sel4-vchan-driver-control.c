@@ -503,12 +503,9 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
             return -EINVAL;
         }
 
-        vchan_args->size = min(remaining, FILE_DATAPORT_MAX_SIZE);
-        if(vchan_args->stream) {
-            res = wait_for_event(vchan_args->v.dest, vchan_args->v.port, cmd, 1);
-        } else {
-            res = wait_for_event(vchan_args->v.dest, vchan_args->v.port, cmd, vchan_args->size);
-        }
+        vchan_args->size = max(1, event_thread_info(vchan_args->v.dest, vchan_args->v.port, cmd));
+        vchan_args->size = min(vchan_args->size, remaining);
+        res = wait_for_event(vchan_args->v.dest, vchan_args->v.port, cmd, vchan_args->size);
 
         /* Connection closed and/or there is no data */
         if(res == -1) {
@@ -525,10 +522,10 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
         }
 
         total += vchan_args->size;
-        if(remaining < FILE_DATAPORT_MAX_SIZE || vchan_args->stream)
+        if(vchan_args->stream)
             remaining = 0;
         else
-            remaining -= FILE_DATAPORT_MAX_SIZE;
+            remaining -= vchan_args->size;
     }
 
     send_size = total;
