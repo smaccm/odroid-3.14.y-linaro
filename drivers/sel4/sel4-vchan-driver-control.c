@@ -76,6 +76,9 @@
 #define DRIVER_DESC "SeL4 IPC inter-vm communication"
 #define _ASM_VMCALL ".byte 0x0f,0x01,0xc1" /* ia32 instruction to perform a vmcall hypervisor exception */
 
+#define SEL4_VCHAN_TRAP_LOC 0x2040000
+#define SEL4_VCHAN_TRAP_SZ 0x1000
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR(DRIVER_AUTH);
 MODULE_DESCRIPTION(DRIVER_DESC);
@@ -115,7 +118,6 @@ int sel4_driver_vchan_state(void *cont, ioctl_arg_t *args, int cmd);
 static struct vmm_op_lookup_table {
     int (*op_func[NUM_VMM_OPS])(void *, ioctl_arg_t *, int);
 } vmm_op_lookup_table = {
-
     .op_func[VMM_NUM_OF_DOM] = &vmm_def_action,
 
     .op_func[VCHAN_SEND] = &vmm_read_write,
@@ -127,9 +129,6 @@ static struct vmm_op_lookup_table {
     .op_func[SEL4_VCHAN_CLOSE] = &sel4_driver_vchan_close,
     .op_func[SEL4_VCHAN_WAIT] = &sel4_driver_vchan_wait,
     .op_func[SEL4_VCHAN_STATE] = &sel4_driver_vchan_state,
-
-    // .op_func[VCHAN_SLEEP] = &driver_sleep_vm,
-    // .op_func[VCHAN_WAKEUP] = &driver_wakeup_vm,
 };
 
 
@@ -197,14 +196,6 @@ static struct cdev c_dev;       // Global variable for the character device stru
 static struct class *cl;        // Global variable for the device class
 
 static int sel4_vchan_drv_probe(struct platform_device *pdev) {
-    // printk(KERN_ALERT "sel4-vchan-driver: ##### Salut, Mundi, vmm_manager: assigned major: %d #####\n", vchan_dev_major);
-    // res = devm_ioremap(&pdev->dev, res->start, resource_size(res));
-    // if(!res) {
-    //     dev_err(&pdev->dev, "Failed to remap I/O memory\n");
-    //     err = -ENOMEM;
-    //     goto fail;
-    // }
-
     return 0;
 }
 
@@ -219,20 +210,12 @@ static int __init sel4_vchan_init(void) {
     int err, irq, res, *data;
     struct platform_device *pdev = &sel4_vchan_device;
 
-
     res = alloc_chrdev_region( &first, 0, 1, DRIVER_NAME );
     if(res < 0) {
         dev_err(&pdev->dev, "Unable to alloc chardev region");
         err = -1;
         goto fail;
     }
-
-    // res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-    // if(!res) {
-    //     dev_err(&pdev->dev, "Failed to get I/O memory\n");
-    //     err = -ENXIO;
-    //     goto fail;
-    // }
 
     if ( (cl = class_create( THIS_MODULE, "vmm_manager" ) ) == NULL ) {
         dev_err(&pdev->dev, "chardev - class creation failed\n");
@@ -251,7 +234,7 @@ static int __init sel4_vchan_init(void) {
 
     irq = platform_get_irq(pdev, 0);
     if (!irq) {
-        dev_err(&pdev->dev, "Failed to get IRQ\n");
+        dev_err(&pdev->dev, "vchan irq - could not find irq\n");
         err = -ENODEV;
         goto fail;
     }
@@ -266,9 +249,6 @@ static int __init sel4_vchan_init(void) {
         goto fail;
     }
 
-    // uvargs = (vmm_args_t *)vargs->data;
-    hyp_call_phys_addr = ioremap(0x2040000, 0x1000);
-
     /* Register this device with the linux kernel */
     vchan_dev_major = register_chrdev(0, DRIVER_NAME, &vmm_fops);
     if (vchan_dev_major < 0) {
@@ -280,7 +260,7 @@ static int __init sel4_vchan_init(void) {
     /* Create a memory buffer in the kernel for copying in/out non vchan arguments */
     vmm_mem_buf = kmalloc(sizeof(struct vmcall_args), 0);
     if (vmm_mem_buf == NULL) {
-        printk ("k_vmm_manager: Failed to allocate buffer memory\n");
+        dev_err(&pdev->dev, "failed to allocate buffer memory");
         err = -ENOMEM;
         goto fail;
     }
@@ -288,7 +268,7 @@ static int __init sel4_vchan_init(void) {
     vargs = (struct vmcall_args *)vmm_mem_buf;
     vargs->data = kmalloc(sizeof(struct vmm_args), 0);
     if (vargs->data == NULL) {
-        printk ("k_vmm_manager: Failed to allocate buffer memory\n");
+        dev_err(&pdev->dev, "failed to allocate buffer memory");
         kfree(vmm_mem_buf);
         err = -ENOMEM;
         goto fail;
@@ -296,12 +276,16 @@ static int __init sel4_vchan_init(void) {
 
     /* Store physical addresses of memory buffers, as the vmm uses physical addresses */
     uvargs = (vmm_args_t *)vargs->data;
-    hyp_call_phys_addr = ioremap(0x2040000, 0x1000);
+    hyp_call_phys_addr = ioremap(SEL4_VCHAN_TRAP_LOC, SEL4_VCHAN_TRAP_SZ);
+    if(hyp_call_phys_addr == NULL) {
+        err = -EINVAL;
+        goto fail;
+    }
 
     /* Check with the hypervisor for ok connection */
     err = call_into_hypervisor(VMM_CONNECT, uvargs, DRIVER_ARGS_MAX_SIZE, vargs);
     if (err) {
-        printk ("k_vmm_manager: failed on sel4 hypervisor connection %d", err);
+        dev_err(&pdev->dev, "failed on sel4 vmm connection");
         kfree(vargs->data);
         kfree(vmm_mem_buf);
         err = -EINVAL;
@@ -311,7 +295,6 @@ static int __init sel4_vchan_init(void) {
     /* Set the running number for this vm */
     data = (int *)uvargs->ret_data;
     vmm_run_num = *data;
-    // printk(KERN_INFO "k_vmm_manager: vmm driver running on guest %d|%d\n", vmm_run_num,  *data);
 
     cdev_init( &c_dev, &vmm_fops );
     if( cdev_add( &c_dev, first, 1 ) == -1) {
@@ -325,15 +308,10 @@ static int __init sel4_vchan_init(void) {
 
     pr_info("%s: " DRIVER_DESC "\n", DRIVER_NAME);
 
-
     return platform_driver_register(&sel4_vchan_driver);
 
     fail:
         return err;
-
-
-
-    // printk(KERN_INFO "k_vmm_manager: Salut, Mundi, vmm_manager: assigned major: %d\n", vchan_dev_major);
 
     return 0;
 }
@@ -341,11 +319,9 @@ static int __init sel4_vchan_init(void) {
 /* Removal of the vmm_driver */
 static void __exit sel4_vchan_exit(void) {
     // unregister_chrdev(vchan_dev_major, DRIVER_NAME);
-
     // kfree(vargs->data);
     // kfree(vmm_mem_buf);
-
-    printk(KERN_INFO "k_vmm_manager: Removed vmm manager module\n");
+    printk(KERN_INFO "sel4-vchan-driver: Removed vmm manager module\n");
     return;
 }
 
@@ -379,19 +355,19 @@ static long vmm_manager_ioctl(struct file *f, unsigned int cmd, unsigned long ar
     } else {
         /* Check for a valid command and a non-null pointer */
         if(vmm_op_lookup_table.op_func[cmd] == NULL ) {
-            printk("drvr: bad cmd %d\n", cmd);
+            printk(KERN_ERR "sel4-vchan-driver: bad ioctl cmd %d\n", cmd);
             return -ENOTTY;
         }
 
         in_arg_addr = kmalloc(size, GFP_KERNEL);
         if(in_arg_addr == NULL) {
-            printk("drvr: bad malloc\n");
+            printk(KERN_ERR "sel4-vchan-driver: bad kmalloc\n");
             return -ENOMEM;
         }
 
         err = copy_from_user(in_arg_addr, user_arg, size);
         if(err) {
-            printk("drvr: bad cpy %d\n", err);
+            printk(KERN_ERR "sel4-vchan-driver: bad cpy %d\n", err);
             kfree(in_arg_addr);
             return -EINVAL;
         }
@@ -423,7 +399,7 @@ int call_into_hypervisor(int cmd, void *data, size_t sz, vmcall_args_t *vmcall) 
     down(&hyp_sem);
     if(hyp_call_phys_addr == NULL) {
         return -1;
-        printk("vchan: >>> bad call\n");
+        printk(KERN_ERR "sel4-vchan-driver: bad call to sel4 vmm\n");
     } else {
         unsigned *write = (unsigned *)hyp_call_phys_addr;
         *write = phys_ptr;
@@ -467,17 +443,17 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
 
     /* Simple sanity checking of size and ptr */
     if(user_ptr == NULL) {
-        printk("k_vmm_manager_vchan: bad ptr\n");
+        printk(KERN_ERR "sel4-vchan-driver-readwrite: bad user pointer\n");
         return -EINVAL;
     } else if (vchan_args->size <= 0) {
-        printk("k_vmm_manager_vchan: bad size\n");
+        printk(KERN_ERR "sel4-vchan-driver-readwrite: bad readwrite sz\n");
         return 0;
     }
 
     /* Make an argument that can be passed into the kernel */
     vchan_args->mmap_ptr = kmalloc(vchan_args->size, GFP_KERNEL);
     if(vchan_args->mmap_ptr == NULL) {
-        printk("k_vmm_manager_vchan: bad malloc\n");
+        printk(KERN_ERR "sel4-vchan-driver-readwrite: bad malloc\n");
         return -ENOMEM;
     }
 
@@ -485,12 +461,11 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
     if(cmd == VCHAN_SEND) {
         err = copy_from_user(vchan_args->mmap_ptr, user_ptr, vchan_args->size);
         if(err) {
-            printk("sel4-vchan-driver-readwrite: BAD 2nd COPY\n");
+            printk(KERN_ERR "sel4-vchan-driver-readwrite: bad copy of user data\n");
             kfree(vchan_args->mmap_ptr);
             return -EINVAL;
         }
     }
-
 
     remaining = vchan_args->size;
     total = 0;
@@ -499,7 +474,7 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
                 cmd, vchan_args->v.port, remaining, vchan_args->stream);
         vchan_args->mmap_phys_ptr = virt_to_phys(vchan_args->mmap_ptr + total);
         if(vchan_args->mmap_phys_ptr == 0) {
-            printk("sel4-vchan-driver-readwrite: bad phys pointer\n");
+            printk(KERN_ERR "sel4-vchan-driver-readwrite: bad phys pointer\n");
             return -EINVAL;
         }
 
@@ -509,14 +484,14 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
 
         /* Connection closed and/or there is no data */
         if(res == -1) {
-            printk("sel4-vchan-driver-readwrite: error in wait!\n");
+            printk(KERN_ERR "sel4-vchan-driver-readwrite: error waiting, is vchan closed?\n");
             kfree(vchan_args->mmap_ptr);
             return 0;
         }
 
         err = call_into_hypervisor(cmd, vchan_args, args->size, vargs);
         if(err) {
-            printk("sel4-vchan-driver-readwrite: bad hypervisor call %d\n", err);
+            printk(KERN_ERR "sel4-vchan-driver-readwrite: bad sel4 vmm call '%d'\n", err);
             kfree(vchan_args->mmap_ptr);
             return err;
         }
@@ -533,7 +508,7 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
     if(cmd == VCHAN_RECV) {
         err = copy_to_user(user_ptr, vchan_args->mmap_ptr, send_size);
         if(err) {
-            printk("sel4-vchan-driver-readwrite: copying out %d failed\n", send_size);
+            printk(KERN_ERR "sel4-vchan-driver-readwrite: could not copy out %d bytes\n", send_size);
             kfree(vchan_args->mmap_ptr);
             return -EINVAL;
         }
@@ -556,6 +531,7 @@ int vmm_guest_num(void *cont, ioctl_arg_t *args, int cmd) {
     /* Finished, copy out arguments */
     err = copy_to_user(args->ptr, uvargs, sizeof(vmm_args_t));
     if(err) {
+        printk(KERN_ERR "sel4-vchan-driver: failed to get running vm number\n");
         return -EINVAL;
     }
 
@@ -570,10 +546,14 @@ int sel4_driver_vchan_connect(void *cont, ioctl_arg_t *args, int cmd) {
     int err = 0;
     vchan_alert_t *event_mon;
     vchan_connect_t *pass = (vchan_connect_t *)cont;
-    // printk("cn: %d %d %d %d\n", pass->v.dest, pass->v.port, pass->event_mon, pass->eventfd);
+
+    printk(KERN_DEBUG "sel4-vchan-driver-connect: cn = %d %d %d %d \n",
+           pass->v.dest, pass->v.port, pass->event_mon, pass->eventfd);
+
     /* Set up event monitor */
     event_mon = kmalloc(sizeof(vchan_alert_t), GFP_KERNEL);
     if(event_mon == NULL) {
+        printk(KERN_ERR "sel4-vchan-driver-connect: could not create vchan monitor\n");
         return -ENOMEM;
     }
 
@@ -586,13 +566,13 @@ int sel4_driver_vchan_connect(void *cont, ioctl_arg_t *args, int cmd) {
     pass->event_mon = virt_to_phys(event_mon);
 
     if(new_event_instance(pass->v.dest, pass->v.port, pass->eventfd, event_mon, vmm_run_num) < 0) {
-        printk("k_vmm_manager_vchan_connect: bad event creation\n");
+        printk(KERN_ERR "sel4-vchan-driver-connect: could not create vchan monitor instance\n");
         return -EINVAL;
     }
 
     err = call_into_hypervisor(cmd, cont, args->size, vargs);
     if (err) {
-        printk("k_vmm_manager_vchan_connect: bad hypervisor call\n");
+        printk(KERN_ERR "sel4-vchan-driver-connect: bad sel4 vmm call\n");
         rem_event_instance(pass->v.dest, pass->v.port);
         return err;
     }
@@ -610,12 +590,14 @@ int sel4_driver_vchan_close(void *cont, ioctl_arg_t *args, int cmd) {
 
     pass = (vchan_connect_t *)cont;
 
-    // printk("cn close: %d %d %d %d\n", pass->v.dest, pass->v.port, pass->event_mon, pass->eventfd);
+    printk(KERN_DEBUG "sel4-vchan-driver-close: %d %d %d %d\n",
+           pass->v.dest, pass->v.port, pass->event_mon, pass->eventfd);
+
     rem_event_instance(pass->v.dest, pass->v.port);
 
     err = call_into_hypervisor(cmd, cont, args->size, vargs);
     if (err) {
-        printk("k_vmm_manager_vchan_close: bad hypervisor call\n");
+        printk(KERN_ERR "sel4-vchan-driver-close: bad sel4 vmm call\n");
         return err;
     }
 
@@ -635,21 +617,17 @@ int sel4_driver_vchan_wait(void *cont, ioctl_arg_t *args, int cmd) {
         if(in_wait->state < 0)
             return -1;
     } else {
-        // printk("kwait: perfoming wait\n");
         /* Wait for data, or closed connection */
         in_wait->state = wait_for_event(in_wait->v.dest, in_wait->v.port, VCHAN_RECV, 1);
     }
 
     err = copy_to_user(args->ptr, cont, sizeof(vchan_check_args_t));
     if(err) {
-        printk("k_vmm_manager_vchan_wait: failed copyout\n");
+        printk(KERN_ERR "sel4-vchan-driver-wait: failed to copy out wait status\n");
         return -1;
     }
 
-    // printk("%d;;retval\n", in_wait->state);
-
     return sizeof(vchan_check_args_t);
-
 }
 
 /*
@@ -657,52 +635,20 @@ int sel4_driver_vchan_wait(void *cont, ioctl_arg_t *args, int cmd) {
 */
 int sel4_driver_vchan_state(void *cont, ioctl_arg_t *args, int cmd) {
     int err;
-    // printk("k_vmm_manager_vchan_state: checking state\n");
 
     err = call_into_hypervisor(cmd, cont, args->size, vargs);
     if (err) {
-        printk("k_vmm_manager_vchan_state: bad hypervisor call %d err\n", err);
         return -EINVAL;
     }
 
     err = copy_to_user(args->ptr, cont, sizeof(vchan_check_args_t));
     if(err) {
-        printk("k_vmm_manager_vchan_state: bad copy\n");
+        printk("sel4-vchan-driver-status: bad copyout to user\n");
         return -EINVAL;
     }
 
     return sizeof(vchan_check_args_t);
 }
-
-/*
-    Sleep this vm until it is woken up by an event
-*/
-int driver_sleep_vm(void *cont, ioctl_arg_t *args, int cmd) {
-    int err;
-    err = call_into_hypervisor(cmd, cont, args->size, vargs);
-    if (err) {
-        printk("k_vmm_manager_vchan_state: bad sleep call\n");
-        return err;
-    }
-
-    return 0;
-}
-
-/*
-    Wakeup a given vm by sending it an event
-*/
-int driver_wakeup_vm(void *cont, ioctl_arg_t *args, int cmd) {
-    int err;
-
-    err = call_into_hypervisor(cmd, cont, args->size, vargs);
-    if (err) {
-        printk("k_vmm_manager_vchan_state: bad wakeup call\n");
-        return err;
-    }
-
-    return  0;
-}
-
 
 module_init(sel4_vchan_init);
 module_exit(sel4_vchan_exit);

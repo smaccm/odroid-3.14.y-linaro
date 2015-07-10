@@ -60,7 +60,7 @@ static int check_valid_action(int domain, int port, int type, size_t request_siz
 static irqreturn_t event_irq_handler(int, void *);
 static void event_thread_run(struct work_struct *work);
 static einstance_t *get_event_instance(int domain, int port);
-static void print_inst(void);
+static void print_vchan_inst(void);
 
 /*
     Bottom half interrupt handler
@@ -90,7 +90,7 @@ void free_event_irq_handler() {
 int init_event_thread(void) {
     /* Set up interrupt handler */
     if(reg_event_irq_handler() < 0) {
-        printk(KERN_ALERT "sel4-vchan-driver-irq: failed to register handler");
+        printk(KERN_ERR "sel4-vchan-driver-irq: failed to register handler");
         return -1;
     }
 
@@ -101,11 +101,11 @@ int init_event_thread(void) {
         if(vchan_ctrl.event_work_struct) {
             INIT_WORK( vchan_ctrl.event_work_struct, event_thread_run );
         } else {
-            printk(KERN_ALERT "sel4-vchan-driver-irq: failed to alloc mem for workqueue");
+            printk(KERN_ERR "sel4-vchan-driver-irq: failed to alloc mem for workqueue");
             return -1;
         }
     } else {
-        printk(KERN_ALERT "sel4-vchan-driver-irq: failed to init workqueue");
+        printk(KERN_ERR "sel4-vchan-driver-irq: failed to init workqueue");
         return -1;
     }
 
@@ -125,24 +125,25 @@ int new_event_instance(int domain, int port, int eventfd, vchan_alert_t *mon, in
     struct file * efd_file = NULL;
 
     if(mon == NULL) {
-        printk("ethread: bad mon!\n");
-        return -1;
+        printk(KERN_ERR "sel4-vchan-driver-irq: bad vchan monitor\n");
+        return -EINVAL;
     }
 
     down(&vchan_ctrl.inst_sem);
 
     inst = get_event_instance(domain, port);
     if(inst != NULL) {
-        printk("ethread: warning: event already exists and is not closed!\n");
+        printk(KERN_ERR "sel4-vchan-driver-irq: vchan monitor instance already active\n");
+        printk(KERN_ERR "sel4-vchan-driver-irq: can only have one monitor instance per vchan\n");
         up(&vchan_ctrl.inst_sem);
-        return -1;
+        return -EINVAL;
     }
 
     inst = kmalloc(sizeof(einstance_t), GFP_ATOMIC);
     if(inst == NULL) {
-        printk("ethread: bad inst!\n");
+        printk(KERN_ERR "sel4-vchan-driver-irq: failed to allocate vchan monitor instance mem\n");
         up(&vchan_ctrl.inst_sem);
-        return -1;
+        return -EINVAL;
     }
 
     vchan_ctrl.num_instances++;
@@ -184,7 +185,7 @@ void rem_event_instance(int domain, int port) {
 
     list_for_each_entry_safe(inst, next, head, node) {
         if(inst->domain == domain && inst->port == port) {
-            printk(KERN_DEBUG "linux-sel4-vchan-driver: instance not found!\n");
+            printk(KERN_DEBUG "linux-sel4-vchan-driver: found instance to delete\n");
             list_del(&inst->node);
             eventfd_ctx_put(inst->efd_ctx);
             kfree(inst->event_mon);
@@ -195,7 +196,7 @@ void rem_event_instance(int domain, int port) {
         }
     }
 
-    printk(KERN_DEBUG "linux-sel4-vchan-driver: instance not found!\n");
+    printk(KERN_ERR "linux-sel4-vchan-driver: trying to delete non-existent instance\n");
 
     up(&vchan_ctrl.inst_sem);
 }
@@ -264,8 +265,8 @@ int event_thread_info(int domain, int port, int type) {
             rval = alrt->buffer_space;
         }
     }
-
     up(&vchan_ctrl.inst_sem);
+
     return rval;
 }
 
@@ -302,7 +303,7 @@ int wait_for_event(int domain, int port, int type, size_t request_size) {
 
     /* Cannot perform action, vchan is closed */
     if(status < 0) {
-        printk(KERN_ALERT "sel4-vchan-driver event: bad status of %d\n", status);
+        printk(KERN_ERR "sel4-vchan-driver event: bad status of %d\n", status);
         return -1;
     } else if(status == 0) {
         /* Vchan is blocking, sleep until non-block */
@@ -327,13 +328,11 @@ int wait_for_event(int domain, int port, int type, size_t request_size) {
 /*
     Debug printing routine
 */
-static void print_inst(void) {
+static void print_vchan_inst(void) {
     einstance_t *inst, *next;
     struct list_head *head = &vchan_ctrl.instances;
-    printk("--I %d--\n", vchan_ctrl.num_instances);
+    printk(KERN_DEBUG "sel4-vchan-driver-irq: %d active instances = ", vchan_ctrl.num_instances);
     list_for_each_entry_safe(inst, next, head, node) {
-        printk("|INST|p:%d|d:%d|-", inst->port, inst->domain);
-
+        printk(KERN_DEBUG "|inst p:%d d:%d|-", inst->port, inst->domain);
     }
-    printk("\n-----\n");
 }
