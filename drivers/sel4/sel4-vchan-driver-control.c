@@ -434,7 +434,7 @@ int vmm_def_action(void *cont, ioctl_arg_t *args, int cmd) {
     Perform a read/write to a given operation
 */
 int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
-    int err, res;
+    int err, res, closed;
     size_t send_size, remaining, total;
     void *user_ptr;
 
@@ -470,15 +470,35 @@ int vmm_read_write(void *cont, ioctl_arg_t *args, int cmd) {
     remaining = vchan_args->size;
     total = 0;
     while(remaining > 0) {
+        int stored = event_thread_info(vchan_args->v.dest, vchan_args->v.port, cmd, &closed);
+        if(stored < 0) {
+            printk(KERN_DEBUG "sel4-vchan-driver: readwrite req: %d|%d error, vchan closed?\n",
+                cmd, vchan_args->v.port);
+            return -1;
+        }
+
+        if(closed) {
+            if(cmd == VCHAN_RECV) {
+                if(!vchan_args->stream && vchan_args->size > stored) {
+                    return -1;
+                } else if(vchan_args->stream && stored == 0) {
+                    return -1;
+                }
+            } else {
+                return -1;
+            }
+        }
+
         printk(KERN_DEBUG "sel4-vchan-driver: readwrite req: %d|%d size: %d|%d\n",
                 cmd, vchan_args->v.port, remaining, vchan_args->stream);
+
         vchan_args->mmap_phys_ptr = virt_to_phys(vchan_args->mmap_ptr + total);
         if(vchan_args->mmap_phys_ptr == 0) {
             printk(KERN_ERR "sel4-vchan-driver-readwrite: bad phys pointer\n");
             return -EINVAL;
         }
 
-        vchan_args->size = max(1, event_thread_info(vchan_args->v.dest, vchan_args->v.port, cmd));
+        vchan_args->size = max(1, stored);
         vchan_args->size = min(vchan_args->size, remaining);
         res = wait_for_event(vchan_args->v.dest, vchan_args->v.port, cmd, vchan_args->size);
 
@@ -559,7 +579,6 @@ int sel4_driver_vchan_connect(void *cont, ioctl_arg_t *args, int cmd) {
 
     event_mon->dest = pass->v.dest;
     event_mon->port = pass->v.port;
-    event_mon->is_closed = 0;
     event_mon->buffer_space = 0;
     event_mon->data_ready = 0;
 
@@ -609,12 +628,12 @@ int sel4_driver_vchan_close(void *cont, ioctl_arg_t *args, int cmd) {
     nowait > 0: check the state of the shared vchan buffer
 */
 int sel4_driver_vchan_wait(void *cont, ioctl_arg_t *args, int cmd) {
-    int err;
+    int err, closed;
     vchan_check_args_t *in_wait = (vchan_check_args_t *)cont;
 
     if(in_wait->nowait) {
-        in_wait->state = event_thread_info(in_wait->v.dest, in_wait->v.port, in_wait->checktype);
-        if(in_wait->state < 0)
+        in_wait->state = event_thread_info(in_wait->v.dest, in_wait->v.port, in_wait->checktype, &closed);
+        if(in_wait->state < 0 || closed)
             return -1;
     } else {
         /* Wait for data, or closed connection */

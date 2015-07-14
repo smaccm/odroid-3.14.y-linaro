@@ -25,8 +25,8 @@
 typedef struct event_instance {
     int port, domain, self; /* vchan connection */
     /*
-        Value linked to hypervisor,
-            hypervisor changes this value whenever the status of the vchan buffer changes
+        vchan monitor linked to sel4 vmm vchan instance
+            vmm changes values stored in this monitor, whenever the vchan changes
     */
     vchan_alert_t *event_mon;
     /*
@@ -40,8 +40,10 @@ typedef struct event_instance {
 
 static struct vchan_event_control {
     int num_instances;
-    struct semaphore inst_sem; /* Mutex for modifying the vchan instance list */
-    struct list_head instances; /* All active vchan instances in the system */
+    /* Mutex for modifying the vchan instance list */
+    struct semaphore inst_sem;
+    /* All active vchan instances in the system */
+    struct list_head instances;
 
     /*
         Used by event_thread_run, a top half interrupt handler
@@ -228,15 +230,17 @@ static int check_valid_action(int domain, int port, int type, size_t request_siz
     if(type == VCHAN_RECV) {
         if(request_size <= alrt->data_ready) {
             return 1;
-        } else if(alrt->is_closed) {
+        /* closed vchan connection, and no more data ready to read */
+        } else if(alrt->data_ready == 0 && alrt->buffer_space == -1) {
             return -1;
         }
     } else {
-        if(!alrt->is_closed) {
+        if(alrt->buffer_space >= 0) {
             if(alrt->buffer_space >= request_size) {
                 return 1;
             }
         } else {
+            /* closed vchan connection, cannot send any more data */
             return -1;
         }
     }
@@ -245,7 +249,7 @@ static int check_valid_action(int domain, int port, int type, size_t request_siz
     return 0;
 }
 
-int event_thread_info(int domain, int port, int type) {
+int event_thread_info(int domain, int port, int type, int *closed) {
     int rval;
     vchan_alert_t *alrt;
 
@@ -259,12 +263,18 @@ int event_thread_info(int domain, int port, int type) {
     if(type == NOWAIT_DATA_READY || type == VCHAN_RECV) {
         rval = alrt->data_ready;
     } else {
-        if(alrt->is_closed) {
-            rval = 0;
-        } else {
+        if(alrt->buffer_space >= 0) {
             rval = alrt->buffer_space;
+        } else {
+            rval = 0;
         }
     }
+
+    if(alrt->buffer_space == -1)
+        *closed = 1;
+    else
+        *closed = 0;
+
     up(&vchan_ctrl.inst_sem);
 
     return rval;
@@ -298,17 +308,17 @@ static einstance_t *get_event_instance(int domain, int port) {
     Wait for a desired event to happen, blocking if it has not happened already
 */
 int wait_for_event(int domain, int port, int type, size_t request_size) {
-    int vchan_info;
-    int status = check_valid_action(domain, port, type, request_size);;
 
+    int closed;
+    int status = check_valid_action(domain, port, type, request_size);
+    int vchan_info = event_thread_info(domain, port, type, &closed);
     /* Cannot perform action, vchan is closed */
-    if(status < 0) {
-        printk(KERN_ERR "sel4-vchan-driver event: bad status of %d\n", status);
+    if(status < 0 || closed) {
+        printk(KERN_ERR "sel4-vchan-driver: closed status\n");
         return -1;
     } else if(status == 0) {
         /* Vchan is blocking, sleep until non-block */
         printk(KERN_DEBUG "linux-sel4-vchan-driver: sleeping thread until action possible\n");
-        vchan_info = event_thread_info(domain, port, type);
         if(type == VCHAN_RECV) {
             printk(KERN_DEBUG "linux-sel4-vchan-driver: action: recv request:|sz:%d| have:|%d|\n", request_size, vchan_info);
         } else {
@@ -321,6 +331,8 @@ int wait_for_event(int domain, int port, int type, size_t request_size) {
             printk(KERN_DEBUG "linux-sel4-vchan-driver: walking away now with %d..\n", status);
         } while(status == 0);
     }
+
+    printk(KERN_DEBUG "sel4-vchan-driver: status is %d\n", status);
 
     return status;
 }
